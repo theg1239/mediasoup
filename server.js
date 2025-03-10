@@ -25,7 +25,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 app.get('/health', (req, res) => {
-  res.status(200).send('OK');
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
 });
 
 app.use(express.static('public'));
@@ -37,6 +37,8 @@ app.get('/', (req, res) => {
     <p>Environment: ${process.env.NODE_ENV || 'development'}</p>
     <p>Workers: ${workers.length}</p>
     <p>Active rooms: ${rooms.size}</p>
+    <p>Socket.io is available at: <code>${req.protocol}://${req.get('host')}</code></p>
+    <p>Health check endpoint: <code>${req.protocol}://${req.get('host')}/health</code></p>
   `);
 });
 
@@ -965,4 +967,67 @@ io.on('connection', socket => {
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Workers: ${workers.length}`);
+  console.log(`Announced IP: ${process.env.ANNOUNCED_IP || 'default'}`);
+  console.log(`CORS: ${process.env.CORS_ORIGIN || 'all origins'}`);
+  
+  console.log('Available endpoints:');
+  console.log('- GET /health - Health check endpoint');
+  console.log('- GET / - Server info');
+  console.log('- WebSocket - Socket.io connection');
+});
+
+server.on('error', (error) => {
+  console.error('Server error:', error);
+});
+
+process.on('SIGINT', () => {
+  console.log('Received SIGINT, shutting down gracefully');
+  cleanupAndExit();
+});
+
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM, shutting down gracefully');
+  cleanupAndExit();
+});
+
+function cleanupAndExit() {
+  for (const roomId of rooms.keys()) {
+    closeAndCleanupRoom(roomId);
+  }
+  
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+  
+  setTimeout(() => {
+    console.error('Forced exit due to timeout');
+    process.exit(1);
+  }, 5000);
+}
+
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  next();
+});
+
+io.on('error', (error) => {
+  console.error('Socket.io server error:', error);
+});
+
+io.engine.on('connection_error', (err) => {
+  console.error('Socket.io connection error:', err);
+});
+
+io.on('connection', (socket) => {
+  socket.on('ping', (callback) => {
+    if (typeof callback === 'function') {
+      callback();
+    }
+  });
 });
