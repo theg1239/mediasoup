@@ -233,7 +233,7 @@ io.on('connection', socket => {
         producerId,
         kind: consumer.kind,
         rtpParameters: consumer.rtpParameters,
-        userId: socket.data.userId
+        peerId: socket.data.userId
       })
       setTimeout(() => {
         consumer.resume()
