@@ -16,8 +16,8 @@ const io = socketIo(server, {
 
 const mediasoupOptions = {
   worker: {
-    rtcMinPort: 2000,
-    rtcMaxPort: 2020,
+    rtcMinPort: 40000,
+    rtcMaxPort: 49999,
     logLevel: 'warn',
     logTags: ['info', 'ice', 'dtls', 'rtp', 'srtp', 'rtcp']
   },
@@ -64,11 +64,7 @@ const rooms = new Map()
 async function createRoom(roomId) {
   try {
     const router = await worker.createRouter({ mediaCodecs: mediasoupOptions.router.mediaCodecs })
-    const room = {
-      id: roomId,
-      router,
-      peers: new Map()
-    }
+    const room = { id: roomId, router, peers: new Map() }
     rooms.set(roomId, room)
     console.log(`Room ${roomId} created`)
     return room
@@ -157,6 +153,11 @@ io.on('connection', socket => {
     const peer = room.peers.get(socket.id)
     if (!peer || !peer.transports.producer) return
     try {
+      for (const prod of peer.producers.values()) {
+        if (prod.kind === kind) {
+          return callback({ error: 'Producer for this kind already exists' })
+        }
+      }
       const producer = await peer.transports.producer.produce({ kind, rtpParameters })
       peer.producers.set(producer.id, producer)
       console.log(`Producer ${producer.id} created for ${socket.data.userId}`)
