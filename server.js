@@ -146,7 +146,6 @@ io.on('connection', socket => {
     }
   })
 
-  // Modified produce handler: replace existing producer if needed
   socket.on('produce', async ({ transportId, kind, rtpParameters }, callback) => {
     const roomId = socket.data.roomId
     const room = rooms.get(roomId)
