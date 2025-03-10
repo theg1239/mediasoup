@@ -20,12 +20,22 @@ const io = socketIo(server, {
   },
   pingTimeout: 60000, // Longer ping timeout
   pingInterval: 25000 // More frequent pings
-});
+}); 
 
 function getListenIps() {
   const interfaces = os.networkInterfaces();
   const listenIps = [];
-  const publicIp = process.env.ANNOUNCED_IP;
+  
+  let publicIp = process.env.ANNOUNCED_IP;
+  
+  if (!publicIp && process.env.DYNO) {
+    console.log('Running on Heroku, using 0.0.0.0 with null announced IP');
+    listenIps.push({ 
+      ip: '0.0.0.0', 
+      announcedIp: null
+    });
+    return listenIps;
+  }
   
   listenIps.push({ 
     ip: '0.0.0.0', 
@@ -90,6 +100,8 @@ const mediasoupOptions = {
   }
 };
 
+const roomsInCreation = new Map();
+
 let workers = [];
 const workerLoadCount = new Map();
 
@@ -139,29 +151,52 @@ function releaseWorker(worker) {
 
 const rooms = new Map();
 
-async function createRoom(roomId) {
-  try {
-    console.log(`Attempting to create room ${roomId}`);
-    const worker = getLeastLoadedWorker();
-    const router = await worker.createRouter({
-      mediaCodecs: mediasoupOptions.router.mediaCodecs
-    });
-    
-    const room = { 
-      id: roomId, 
-      router, 
-      worker,
-      peers: new Map(),
-      creationTime: Date.now()
-    };
-    
-    rooms.set(roomId, room);
-    console.log(`Room ${roomId} created successfully`);
-    return room;
-  } catch (error) {
-    console.error('Error creating room:', error);
-    throw error;
+async function getOrCreateRoom(roomId) {
+  let room = rooms.get(roomId);
+  if (room) return room;
+  
+  if (roomsInCreation.has(roomId)) {
+    console.log(`Room ${roomId} is being created, waiting...`);
+    try {
+      await roomsInCreation.get(roomId);
+      return rooms.get(roomId);
+    } catch (error) {
+      console.error(`Error waiting for room ${roomId} to be created:`, error);
+      throw error;
+    }
   }
+  
+  console.log(`Attempting to create room ${roomId}`);
+  
+  const creationPromise = new Promise(async (resolve, reject) => {
+    try {
+      const worker = getLeastLoadedWorker();
+      const router = await worker.createRouter({
+        mediaCodecs: mediasoupOptions.router.mediaCodecs
+      });
+      
+      const room = { 
+        id: roomId, 
+        router, 
+        worker,
+        peers: new Map(),
+        creationTime: Date.now()
+      };
+      
+      rooms.set(roomId, room);
+      console.log(`Room ${roomId} created successfully`);
+      resolve(room);
+    } catch (error) {
+      console.error('Error creating room:', error);
+      reject(error);
+    } finally {
+      roomsInCreation.delete(roomId);
+    }
+  });
+  
+  roomsInCreation.set(roomId, creationPromise);
+  
+  return creationPromise;
 }
 
 async function createWebRtcTransport(router) {
@@ -239,76 +274,91 @@ io.on('connection', socket => {
     socket.data.userName = userName;
     socket.data.userEmail = userEmail;
     
-    let room = rooms.get(roomId);
-    if (!room) {
-      try {
-        room = await createRoom(roomId);
-      } catch (error) {
-        console.error(`Failed to create room ${roomId}:`, error);
-        socket.emit('error', { message: 'Failed to create room' });
-        return;
+    try {
+      const room = await getOrCreateRoom(roomId);
+      
+      room.peers.set(socket.id, {
+        socket,
+        transports: {},
+        producers: new Map(),
+        consumers: new Map(),
+        userId,
+        userName,
+        userEmail
+      });
+      
+      socket.join(roomId);
+      console.log(`User ${userId} (${userName}, ${userEmail}) joined room ${roomId}`);
+      
+      const roomParticipants = [];
+      for (const [_, peer] of room.peers.entries()) {
+        if (peer.userId !== userId) {
+          roomParticipants.push({
+            userId: peer.userId,
+            userName: peer.userName,
+            userInitials: peer.userName.substring(0, 2)
+          });
+        }
       }
+      
+      socket.emit('roomUsers', roomParticipants);
+      
+      socket.to(roomId).emit('userJoined', {
+        userId,
+        userName,
+        userInitials: userName.substring(0, 2)
+      });
+      
+      socket.emit('routerRtpCapabilities', room.router.rtpCapabilities);
+    } catch (error) {
+      console.error(`Error joining room ${roomId}:`, error);
+      socket.emit('error', { message: 'Failed to join room', error: error.message });
     }
-
-    room.peers.set(socket.id, {
-      socket,
-      transports: {},
-      producers: new Map(),
-      consumers: new Map(),
-      userId,
-      userName,
-      userEmail
-    });
-    
-    socket.join(roomId);
-    console.log(`User ${userId} (${userName}, ${userEmail}) joined room ${roomId}`);
-    
-    const roomParticipants = [];
-    for (const [_, peer] of room.peers.entries()) {
-      if (peer.userId !== userId) {
-        roomParticipants.push({
-          userId: peer.userId,
-          userName: peer.userName,
-          userInitials: peer.userName.substring(0, 2)
-        });
-      }
-    }
-    
-    socket.emit('roomUsers', roomParticipants);
-    
-    socket.to(roomId).emit('userJoined', {
-      userId,
-      userName,
-      userInitials: userName.substring(0, 2)
-    });
   });
 
-  socket.on('getRouterRtpCapabilities', () => {
+  socket.on('getRouterRtpCapabilities', async () => {
     console.log(`getRouterRtpCapabilities requested by socket ${socket.id}`);
     const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
-    if (!room) {
-      console.error(`No room found for socket ${socket.id}`);
-      socket.emit('error', { message: 'Room not found' });
-      return;
+    
+    try {
+      const room = await getOrCreateRoom(roomId);
+      
+      if (!room) {
+        console.error(`No room found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Room not found' });
+        return;
+      }
+      
+      socket.emit('routerRtpCapabilities', room.router.rtpCapabilities);
+      console.log(`Sent router RTP capabilities to socket ${socket.id}`);
+    } catch (error) {
+      console.error(`Error getting router capabilities: ${error}`);
+      socket.emit('error', { message: 'Failed to get router capabilities', error: error.message });
     }
-    socket.emit('routerRtpCapabilities', room.router.rtpCapabilities);
-    console.log(`Sent router RTP capabilities to socket ${socket.id}`);
   });
 
   socket.on('createProducerTransport', async ({ forceTcp, rtpCapabilities }) => {
     console.log(`createProducerTransport requested by socket ${socket.id}`);
     const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
-    if (!room) {
-      console.error(`Room ${roomId} not found for socket ${socket.id}`);
-      socket.emit('error', { message: 'Room not found' });
-      return;
-    }
     
     try {
+      const room = await getOrCreateRoom(roomId);
+      
+      if (!room) {
+        console.error(`Room ${roomId} not found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Room not found' });
+        return;
+      }
+      
       const transport = await createWebRtcTransport(room.router);
       const peer = room.peers.get(socket.id);
+      
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Peer not found' });
+        return;
+      }
+      
       peer.transports.producer = transport;
       
       const params = {
