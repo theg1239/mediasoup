@@ -146,6 +146,7 @@ io.on('connection', socket => {
     }
   })
 
+  // Modified produce handler: replace existing producer if needed
   socket.on('produce', async ({ transportId, kind, rtpParameters }, callback) => {
     const roomId = socket.data.roomId
     const room = rooms.get(roomId)
@@ -153,9 +154,12 @@ io.on('connection', socket => {
     const peer = room.peers.get(socket.id)
     if (!peer || !peer.transports.producer) return
     try {
-      for (const prod of peer.producers.values()) {
+      for (const [prodId, prod] of peer.producers.entries()) {
         if (prod.kind === kind) {
-          return callback({ error: 'Producer for this kind already exists' })
+          prod.close()
+          peer.producers.delete(prodId)
+          socket.to(roomId).emit('producerClosed', prodId)
+          break
         }
       }
       const producer = await peer.transports.producer.produce({ kind, rtpParameters })
