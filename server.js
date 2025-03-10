@@ -87,9 +87,11 @@ io.on('connection', socket => {
   console.log('Socket connected:', socket.id)
   socket.data = {}
 
-  socket.on('joinRoom', async ({ roomId, userId }) => {
+  socket.on('joinRoom', async ({ roomId, userId, userName, userEmail }) => {
     socket.data.roomId = roomId
     socket.data.userId = userId
+    socket.data.userName = userName
+    socket.data.userEmail = userEmail
     let room = rooms.get(roomId)
     if (!room) {
       room = await createRoom(roomId)
@@ -98,10 +100,12 @@ io.on('connection', socket => {
       socket,
       transports: {},
       producers: new Map(),
-      consumers: new Map()
+      consumers: new Map(),
+      userName,
+      userEmail
     })
     socket.join(roomId)
-    console.log(`User ${userId} joined room ${roomId}`)
+    console.log(`User ${userId} (${userName}, ${userEmail}) joined room ${roomId}`)
   })
 
   socket.on('getRouterRtpCapabilities', () => {
@@ -127,6 +131,7 @@ io.on('connection', socket => {
         sctpParameters: transport.sctpParameters
       }
       socket.emit('producerTransportCreated', params)
+      console.log(`Producer transport created for ${socket.data.userId}`)
     } catch (error) {
       console.error('createProducerTransport error:', error)
     }
@@ -139,6 +144,10 @@ io.on('connection', socket => {
     const peer = room.peers.get(socket.id)
     if (!peer || !peer.transports.producer) return
     try {
+      if (peer.transports.producer.connectionState && peer.transports.producer.connectionState !== 'new') {
+        console.log(`Transport already connected for ${socket.id}`)
+        return
+      }
       await peer.transports.producer.connect({ dtlsParameters })
       console.log('Producer transport connected for', socket.id)
     } catch (error) {
@@ -158,13 +167,19 @@ io.on('connection', socket => {
           prod.close()
           peer.producers.delete(prodId)
           socket.to(roomId).emit('producerClosed', prodId)
+          console.log(`Existing producer ${prodId} closed for kind ${kind}`)
           break
         }
       }
       const producer = await peer.transports.producer.produce({ kind, rtpParameters })
       peer.producers.set(producer.id, producer)
       console.log(`Producer ${producer.id} created for ${socket.data.userId}`)
-      socket.to(roomId).emit('newProducer', { remoteProducerId: producer.id, userId: socket.data.userId })
+      socket.to(roomId).emit('newProducer', {
+        remoteProducerId: producer.id,
+        userId: socket.data.userId,
+        userName: socket.data.userName,
+        userEmail: socket.data.userEmail
+      })
       callback(producer.id)
     } catch (error) {
       console.error('Produce error:', error)
@@ -189,6 +204,7 @@ io.on('connection', socket => {
         sctpParameters: transport.sctpParameters
       }
       socket.emit('consumerTransportCreated', { ...params, remoteProducerId })
+      console.log(`Consumer transport created for remoteProducer ${remoteProducerId}`)
     } catch (error) {
       console.error('createConsumerTransport error:', error)
     }
@@ -242,6 +258,7 @@ io.on('connection', socket => {
         consumer.resume()
         socket.emit('resumeConsumer', { consumerId: consumer.id })
       }, 500)
+      console.log(`Consumer ${consumer.id} created for ${socket.data.userId}`)
     } catch (error) {
       console.error('Consume error:', error)
       callback({ error: error.message })
@@ -258,6 +275,7 @@ io.on('connection', socket => {
     if (!consumer) return
     try {
       await consumer.resume()
+      console.log(`Consumer ${consumerId} resumed`)
     } catch (error) {
       console.error('Error resuming consumer:', error)
     }
