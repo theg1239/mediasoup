@@ -284,47 +284,88 @@ async function getOrCreateRoom(roomId) {
 }
 
 async function createWebRtcTransport(router) {
-  try {
-    console.log('Creating WebRTC transport...');
-    const transport = await router.createWebRtcTransport(mediasoupOptions.webRtcTransport);
+  const {
+    listenIps,
+    initialAvailableOutgoingBitrate,
+    maxIncomingBitrate
+  } = mediasoupOptions.webRtcTransport;
+  
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error('Timeout creating WebRTC transport'));
+    }, 10000);
     
-    // Initialize a flag to prevent duplicate connect calls
-    transport.isConnecting = false;
-    
-    // Set transport max incoming bitrate
     try {
-      await transport.setMaxIncomingBitrate(mediasoupOptions.webRtcTransport.maxIncomingBitrate);
+      router.createWebRtcTransport({
+        listenIps,
+        enableUdp: true,
+        enableTcp: true,
+        preferUdp: true,
+        initialAvailableOutgoingBitrate,
+        enableSctp: true,
+        numSctpStreams: { OS: 1024, MIS: 1024 },
+        maxSctpMessageSize: 262144,
+        // Add ICE timeout settings
+        iceConsentTimeout: 60, // seconds
+        iceRetransmissionTimeout: 1000, // ms
+      }).then(async (transport) => {
+        clearTimeout(timeout);
+        
+        try {
+          if (maxIncomingBitrate) {
+            await transport.setMaxIncomingBitrate(maxIncomingBitrate);
+          }
+          
+          console.log(`Transport created with ID: ${transport.id}`);
+          
+          transport.on('routerclose', () => {
+            console.log(`Transport ${transport.id} closed because router closed`);
+          });
+          
+          transport.on('icestatechange', (iceState) => {
+            console.log(`Transport ${transport.id} ICE state changed to ${iceState}`);
+          });
+          
+          transport.on('dtlsstatechange', (dtlsState) => {
+            console.log(`Transport ${transport.id} DTLS state changed to ${dtlsState}`);
+            
+            if (dtlsState === 'failed' || dtlsState === 'closed') {
+              console.error(`Transport ${transport.id} DTLS state is ${dtlsState}`);
+            }
+          });
+          
+          transport.on('sctpstatechange', (sctpState) => {
+            console.log(`Transport ${transport.id} SCTP state changed to ${sctpState}`);
+          });
+          
+          resolve({
+            transport,
+            params: {
+              id: transport.id,
+              iceParameters: transport.iceParameters,
+              iceCandidates: transport.iceCandidates,
+              dtlsParameters: transport.dtlsParameters,
+              sctpParameters: transport.sctpParameters
+            }
+          });
+        } catch (error) {
+          clearTimeout(timeout);
+          console.error('Error setting up transport:', error);
+          reject(error);
+        }
+      }).catch((error) => {
+        clearTimeout(timeout);
+        console.error('Error creating WebRTC transport:', error);
+        reject(error);
+      });
     } catch (error) {
-      console.log('Error setting max incoming bitrate:', error);
+      clearTimeout(timeout);
+      console.error('Error in createWebRtcTransport:', error);
+      reject(error);
     }
-    
-    // Handle transport close event
-    transport.on('icestatechange', (iceState) => {
-      console.log(`Transport ICE state changed to ${iceState}`);
-    });
-    
-    // Handle incoming DtlsState
-    transport.on('dtlsstatechange', (dtlsState) => {
-      console.log(`Transport DTLS state changed to ${dtlsState}`);
-      if (dtlsState === 'failed' || dtlsState === 'closed') {
-        console.warn(`Transport DTLS failure detected on transport ${transport.id}`);
-      }
-    });
-    
-    // Handle incoming SCTP States
-    transport.on('sctpstatechange', (sctpState) => {
-      console.log(`Transport SCTP state changed to ${sctpState}`);
-    });
-    
-    console.log('WebRTC transport created:', transport.id);
-    return transport;
-  } catch (error) {
-    console.error('Error creating WebRTC transport:', error);
-    throw error;
-  }
+  });
 }
 
-// Helper to get a peer for a socket
 function getPeerForSocket(socket) {
   const roomId = socket.data.roomId;
   if (!roomId) return null;
@@ -364,15 +405,43 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000);
 
-io.on('connection', socket => {
-  console.log('Socket connected:', socket.id);
-  socket.data = {};
+const activeSockets = new Map();
 
+io.on('connection', (socket) => {
+  console.log(`New socket connection: ${socket.id}`);
+  
+  // Track active sockets
+  activeSockets.set(socket.id, {
+    socket,
+    lastActivity: Date.now(),
+    roomId: null
+  });
+  
+  socket.on('disconnect', (reason) => {
+    console.log(`Socket ${socket.id} disconnected: ${reason}`);
+    handleUserLeaving(socket);
+    activeSockets.delete(socket.id);
+  });
+  
+  socket.on('error', (error) => {
+    console.error(`Socket ${socket.id} error:`, error);
+  });
+  
   socket.on('ping', (callback) => {
     if (typeof callback === 'function') {
       callback();
     }
   });
+  
+  socket.on('heartbeat', () => {
+    if (activeSockets.has(socket.id)) {
+      const socketData = activeSockets.get(socket.id);
+      socketData.lastActivity = Date.now();
+      activeSockets.set(socket.id, socketData);
+    }
+  });
+
+  socket.data = {};
 
   socket.on('joinRoom', async ({ roomId, userId, userName, userEmail }) => {
     console.log(`joinRoom event received from socket ${socket.id} for room ${roomId}`);
@@ -444,7 +513,7 @@ io.on('connection', socket => {
     }
   });
 
-  socket.on('createProducerTransport', async ({ forceTcp, rtpCapabilities }) => {
+  socket.on('createProducerTransport', async ({ forceTcp, rtpCapabilities }, callback) => {
     console.log(`createProducerTransport requested by socket ${socket.id}`);
     const roomId = socket.data.roomId;
     
@@ -453,7 +522,11 @@ io.on('connection', socket => {
       
       if (!room) {
         console.error(`Room ${roomId} not found for socket ${socket.id}`);
-        socket.emit('error', { message: 'Room not found' });
+        if (callback) {
+          callback({ error: 'Room not found' });
+        } else {
+          socket.emit('error', { message: 'Room not found' });
+        }
         return;
       }
       
@@ -463,58 +536,65 @@ io.on('connection', socket => {
         transportOptions.enableTcp = true;
       }
       
-      const transport = await room.router.createWebRtcTransport(transportOptions);
-      transport.isConnecting = false;
+      const transportCreationTimeout = setTimeout(() => {
+        console.error(`Transport creation timed out for socket ${socket.id}`);
+        if (callback) {
+          callback({ error: 'Transport creation timed out' });
+        } else {
+          socket.emit('error', { message: 'Transport creation timed out' });
+        }
+      }, 15000);
       
       try {
-        await transport.setMaxIncomingBitrate(mediasoupOptions.webRtcTransport.maxIncomingBitrate);
-      } catch (err) {
-        console.warn(`Could not set max incoming bitrate: ${err.message}`);
-      }
-      
-      transport.on('dtlsstatechange', dtlsState => {
-        if (dtlsState === 'closed') {
-          console.log(`Producer transport DTLS closed for ${socket.id}`);
-          transport.close();
+        const { transport, params } = await createWebRtcTransport(room.router);
+        
+        clearTimeout(transportCreationTimeout);
+        
+        const peer = room.peers.get(socket.id);
+        if (!peer) {
+          console.error(`Peer not found for socket ${socket.id}`);
+          if (callback) {
+            callback({ error: 'Peer not found' });
+          } else {
+            socket.emit('error', { message: 'Peer not found' });
+          }
+          return;
         }
-      });
-      
-      transport.on('icestatechange', iceState => {
-        console.log(`Producer transport ICE state changed to ${iceState} for ${socket.id}`);
-      });
-      
-      const peer = room.peers.get(socket.id);
-      
-      if (!peer) {
-        console.error(`Peer not found for socket ${socket.id}`);
-        socket.emit('error', { message: 'Peer not found' });
-        return;
+        
+        peer.transports[transport.id] = transport;
+        
+        console.log(`Producer transport created for user ${socket.data.userId} on socket ${socket.id}`);
+        
+        if (callback) {
+          callback(params);
+        } else {
+          socket.emit('producerTransportCreated', params);
+        }
+      } catch (transportError) {
+        clearTimeout(transportCreationTimeout);
+        console.error(`Error creating transport: ${transportError}`);
+        if (callback) {
+          callback({ error: transportError.message });
+        } else {
+          socket.emit('error', { message: 'Failed to create transport', error: transportError.message });
+        }
       }
-      
-      peer.transports.producer = transport;
-      
-      const params = {
-        id: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters,
-        sctpParameters: transport.sctpParameters
-      };
-      
-      socket.emit('producerTransportCreated', params);
-      console.log(`Producer transport created for user ${socket.data.userId} on socket ${socket.id}`);
     } catch (error) {
-      console.error('createProducerTransport error:', error);
-      socket.emit('error', { message: 'Failed to create producer transport', error: error.message });
+      console.error(`Error creating producer transport: ${error}`);
+      if (callback) {
+        callback({ error: error.message });
+      } else {
+        socket.emit('error', { message: 'Failed to create producer transport', error: error.message });
+      }
     }
   });
 
-  socket.on('connectProducerTransport', async ({ dtlsParameters }) => {
-    console.log(`connectProducerTransport requested by socket ${socket.id}`);
-    const roomId = socket.data.roomId;
+  socket.on('connectProducerTransport', async ({ dtlsParameters, transportId }) => {
+    console.log(`connectProducerTransport requested by socket ${socket.id} for transport ${transportId}`);
     
     try {
-      const room = await getOrCreateRoom(roomId);
+      const { roomId } = socket.data;
+      const room = rooms.get(roomId);
       
       if (!room) {
         console.error(`Room ${roomId} not found for socket ${socket.id}`);
@@ -523,127 +603,124 @@ io.on('connection', socket => {
       }
       
       const peer = room.peers.get(socket.id);
-      if (!peer || !peer.transports.producer) {
-        console.error(`Producer transport not found for socket ${socket.id}`);
-        socket.emit('error', { message: 'Producer transport not found' });
+      
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id} in room ${roomId}`);
+        socket.emit('error', { message: 'Peer not found' });
         return;
       }
       
-      const transport = peer.transports.producer;
+      const transport = peer.transports[transportId];
       
-      try {
-        if (transport.isConnecting || 
-            (transport.connectionState && transport.connectionState !== 'new')) {
-          console.log(`Producer transport already connecting/connected for socket ${socket.id}`);
-          socket.emit('producerTransportConnected');
-          return;
-        }
-        
-        transport.isConnecting = true;
-        await transport.connect({ dtlsParameters });
-        transport.isConnecting = false;
-        console.log('Producer transport connected for socket', socket.id);
-        
-        socket.emit('producerTransportConnected');
-      } catch (error) {
-        console.error('Error connecting producer transport for socket', socket.id, error);
-        transport.isConnecting = false;
-        socket.emit('error', { message: 'Failed to connect producer transport', error: error.message });
+      if (!transport) {
+        console.error(`Transport ${transportId} not found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Transport not found' });
+        return;
       }
+      
+      const connectionTimeout = setTimeout(() => {
+        console.error(`Transport ${transportId} connection timed out`);
+        socket.emit('error', { message: 'Transport connection timed out' });
+      }, 30000);
+      
+      await transport.connect({ dtlsParameters });
+      
+      clearTimeout(connectionTimeout);
+      
+      console.log(`Producer transport ${transportId} connected for socket ${socket.id}`);
+      socket.emit('producerTransportConnected');
     } catch (error) {
-      console.error(`Error in connectProducerTransport: ${error}`);
+      console.error(`Error connecting producer transport for socket ${socket.id}:`, error);
       socket.emit('error', { message: 'Failed to connect producer transport', error: error.message });
     }
   });
 
   socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, callback) => {
-    console.log(`produce event received from socket ${socket.id} for kind ${kind}`);
-    const roomId = socket.data.roomId;
+    console.log(`produce requested by socket ${socket.id} for transport ${transportId} (${kind})`);
     
     try {
-      const room = await getOrCreateRoom(roomId);
+      const { roomId } = socket.data;
+      const room = rooms.get(roomId);
       
       if (!room) {
         console.error(`Room ${roomId} not found for socket ${socket.id}`);
-        callback({ error: 'Room not found' });
+        if (callback) {
+          callback({ error: 'Room not found' });
+        } else {
+          socket.emit('error', { message: 'Room not found' });
+        }
         return;
       }
       
       const peer = room.peers.get(socket.id);
-      if (!peer || !peer.transports.producer) {
-        console.error(`Producer transport not found for socket ${socket.id}`);
-        callback({ error: 'Producer transport not found' });
+      
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id} in room ${roomId}`);
+        if (callback) {
+          callback({ error: 'Peer not found' });
+        } else {
+          socket.emit('error', { message: 'Peer not found' });
+        }
         return;
       }
       
-      const transport = peer.transports.producer;
-      if (transport.connectionState !== 'connected') {
-        console.warn(`Producer transport not connected for socket ${socket.id}, current state: ${transport.connectionState}`);
-      }
+      const transport = peer.transports[transportId];
       
-      const isScreenShare = appData && appData.trackType === 'screen';
-      let existingProducer = null;
-      
-      for (const [prodId, prod] of peer.producers.entries()) {
-        const prodIsScreen = prod.appData && prod.appData.trackType === 'screen';
-        if (prod.kind === kind && 
-            ((isScreenShare && prodIsScreen) || (!isScreenShare && !prodIsScreen))) {
-          existingProducer = prod;
-          break;
+      if (!transport) {
+        console.error(`Transport ${transportId} not found for socket ${socket.id}`);
+        if (callback) {
+          callback({ error: 'Transport not found' });
+        } else {
+          socket.emit('error', { message: 'Transport not found' });
         }
+        return;
       }
       
-      if (existingProducer) {
-        console.log(`Closing existing producer ${existingProducer.id} of kind ${kind} for socket ${socket.id}`);
-        existingProducer.close();
-        peer.producers.delete(existingProducer.id);
-        socket.to(roomId).emit('producerClosed', {
-          remoteProducerId: existingProducer.id,
-          userId: socket.data.userId
-        });
-      }
+      // Set a timeout for the production
+      const productionTimeout = setTimeout(() => {
+        console.error(`Production for ${kind} on transport ${transportId} timed out`);
+        if (callback) {
+          callback({ error: 'Production timed out' });
+        } else {
+          socket.emit('error', { message: 'Production timed out' });
+        }
+      }, 30000);
       
-      try {
-        const producer = await transport.produce({ 
-          kind, 
-          rtpParameters,
-          appData: appData || { userId: socket.data.userId }
-        });
-        
-        peer.producers.set(producer.id, producer);
-        console.log(`Producer ${producer.id} (${kind}) created for user ${socket.data.userId} on socket ${socket.id}`);
-        
-        producer.on('transportclose', () => {
-          console.log(`Transport closed for producer ${producer.id} on socket ${socket.id}`);
-          producer.close();
-          peer.producers.delete(producer.id);
-        });
-        
-        producer.on('close', () => {
-          console.log(`Producer ${producer.id} closed on socket ${socket.id}`);
-          peer.producers.delete(producer.id);
-        });
-        
-        callback(producer.id);
-        
-        setTimeout(() => {
-          socket.to(roomId).emit('newProducer', {
-            remoteProducerId: producer.id,
-            kind,
-            userId: socket.data.userId,
-            userName: socket.data.userName,
-            userInitials: socket.data.userEmail?.substring(0, 2) || socket.data.userName.substring(0, 2),
-            appData
-          });
-        }, 500);
-        
-      } catch (producerError) {
-        console.error(`Error creating producer: ${producerError.message}`);
-        callback({ error: producerError.message });
+      const producer = await transport.produce({
+        kind,
+        rtpParameters,
+        appData: { ...appData, peerId: socket.id }
+      });
+      
+      clearTimeout(productionTimeout);
+      
+      peer.producers.set(producer.id, producer);
+      
+      producer.on('transportclose', () => {
+        console.log(`Producer ${producer.id} closed because transport closed`);
+        peer.producers.delete(producer.id);
+      });
+      
+      socket.to(roomId).emit('newProducer', {
+        producerId: producer.id,
+        userId: socket.data.userId,
+        kind
+      });
+      
+      console.log(`Producer ${producer.id} created for socket ${socket.id} (${kind})`);
+      
+      if (callback) {
+        callback({ id: producer.id });
+      } else {
+        socket.emit('producerCreated', { id: producer.id });
       }
     } catch (error) {
-      console.error('Produce error for socket', socket.id, error);
-      callback({ error: error.message });
+      console.error(`Error producing ${kind} for socket ${socket.id}:`, error);
+      if (callback) {
+        callback({ error: error.message });
+      } else {
+        socket.emit('error', { message: `Failed to produce ${kind}`, error: error.message });
+      }
     }
   });
 
@@ -684,97 +761,106 @@ io.on('connection', socket => {
     }
   });
 
-  socket.on('createConsumerTransport', async ({ forceTcp, remoteProducerId }) => {
-    console.log(`createConsumerTransport requested by socket ${socket.id} for remoteProducer ${remoteProducerId}`);
+  socket.on('createConsumerTransport', async ({ forceTcp, remoteProducerId }, callback) => {
+    console.log(`createConsumerTransport requested by socket ${socket.id} for producer ${remoteProducerId}`);
     const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
-    if (!room) {
-      console.error(`Room ${roomId} not found for socket ${socket.id}`);
-      socket.emit('error', { message: 'Room not found' });
-      return;
-    }
-    
-    const peer = room.peers.get(socket.id);
-    if (!peer) {
-      console.error(`Peer not found for socket ${socket.id}`);
-      socket.emit('error', { message: 'Peer not found' });
-      return;
-    }
     
     try {
-      if (peer.transports[remoteProducerId]) {
-        console.log(`Consumer transport already exists for remoteProducer ${remoteProducerId} on socket ${socket.id}`);
-        const existingTransport = peer.transports[remoteProducerId];
-        
-        const params = {
-          id: existingTransport.id,
-          iceParameters: existingTransport.iceParameters,
-          iceCandidates: existingTransport.iceCandidates,
-          dtlsParameters: existingTransport.dtlsParameters,
-          sctpParameters: existingTransport.sctpParameters
-        };
-        
-        socket.emit('consumerTransportCreated', { ...params, remoteProducerId, userId: peer.userId });
+      const room = await getOrCreateRoom(roomId);
+      
+      if (!room) {
+        console.error(`Room ${roomId} not found for socket ${socket.id}`);
+        if (callback) {
+          callback({ error: 'Room not found' });
+        } else {
+          socket.emit('error', { message: 'Room not found' });
+        }
         return;
       }
       
-      const transport = await createWebRtcTransport(room.router);
-      peer.transports[remoteProducerId] = transport;
+      const transportOptions = { ...mediasoupOptions.webRtcTransport };
+      if (forceTcp) {
+        transportOptions.enableUdp = false;
+        transportOptions.enableTcp = true;
+      }
       
-      const params = {
-        id: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters,
-        sctpParameters: transport.sctpParameters
-      };
+      const { transport, params } = await createWebRtcTransport(room.router);
       
-      socket.emit('consumerTransportCreated', { ...params, remoteProducerId, userId: peer.userId });
-      console.log(`Consumer transport created for socket ${socket.id} for remoteProducer ${remoteProducerId}`);
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id}`);
+        if (callback) {
+          callback({ error: 'Peer not found' });
+        } else {
+          socket.emit('error', { message: 'Peer not found' });
+        }
+        return;
+      }
+      
+      // Store the transport
+      peer.transports[transport.id] = transport;
+      
+      console.log(`Consumer transport created for user ${socket.data.userId} on socket ${socket.id}`);
+      
+      // Send the transport parameters back to the client
+      if (callback) {
+        callback({ ...params, remoteProducerId });
+      } else {
+        socket.emit('consumerTransportCreated', { ...params, remoteProducerId });
+      }
     } catch (error) {
-      console.error('createConsumerTransport error for socket', socket.id, error);
-      socket.emit('error', { message: 'Failed to create consumer transport', error: error.message });
+      console.error(`Error creating consumer transport: ${error}`);
+      if (callback) {
+        callback({ error: error.message });
+      } else {
+        socket.emit('error', { message: 'Failed to create consumer transport', error: error.message });
+      }
     }
   });
 
-  socket.on('connectConsumerTransport', async ({ transportId, dtlsParameters }) => {
+  socket.on('connectConsumerTransport', async ({ dtlsParameters, transportId }) => {
     console.log(`connectConsumerTransport requested by socket ${socket.id} for transport ${transportId}`);
-    const peer = getPeerForSocket(socket);
-    if (!peer) {
-      console.error(`Peer not found for socket ${socket.id} in connectConsumerTransport`);
-      socket.emit('error', { message: 'Peer not found' });
-      return;
-    }
-    
-    let transport = null;
-    for (const [_, t] of Object.entries(peer.transports)) {
-      if (t.id === transportId) {
-        transport = t;
-        break;
-      }
-    }
-    
-    if (!transport) {
-      console.error(`Transport ${transportId} not found for socket ${socket.id}`);
-      socket.emit('error', { message: 'Transport not found' });
-      return;
-    }
     
     try {
-      if (transport.isConnecting || (transport.connectionState && transport.connectionState !== 'new')) {
-         console.log(`Consumer transport already connecting/connected for socket ${socket.id}`);
-         socket.emit('consumerTransportConnected', { transportId });
-         return;
+      const { roomId } = socket.data;
+      const room = rooms.get(roomId);
+      
+      if (!room) {
+        console.error(`Room ${roomId} not found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Room not found' });
+        return;
       }
       
-      transport.isConnecting = true;
+      const peer = room.peers.get(socket.id);
+      
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id} in room ${roomId}`);
+        socket.emit('error', { message: 'Peer not found' });
+        return;
+      }
+      
+      const transport = peer.transports[transportId];
+      
+      if (!transport) {
+        console.error(`Transport ${transportId} not found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Transport not found' });
+        return;
+      }
+      
+      // Set a timeout for the connection
+      const connectionTimeout = setTimeout(() => {
+        console.error(`Transport ${transportId} connection timed out`);
+        socket.emit('error', { message: 'Transport connection timed out' });
+      }, 30000);
+      
       await transport.connect({ dtlsParameters });
-      transport.isConnecting = false;
-      console.log('Consumer transport connected for socket', socket.id);
-      socket.emit('consumerTransportConnected', { transportId });
+      
+      clearTimeout(connectionTimeout);
+      
+      console.log(`Consumer transport ${transportId} connected for socket ${socket.id}`);
+      socket.emit('consumerTransportConnected');
     } catch (error) {
-      console.error('Error connecting consumer transport for socket', socket.id, error);
-      transport.isConnecting = false;
+      console.error(`Error connecting consumer transport for socket ${socket.id}:`, error);
       socket.emit('error', { message: 'Failed to connect consumer transport', error: error.message });
     }
   });
@@ -879,89 +965,48 @@ io.on('connection', socket => {
     io.in(roomId).emit('chatMessage', { userId, userName, message, timestamp: Date.now() });
   });
   
-  socket.on('userReady', ({ userId, userName, userInitials }) => {
-    const roomId = socket.data.roomId;
-    if (!roomId) return;
+  socket.on('userReady', ({ userId, roomId }) => {
+    console.log(`User ${userId} is ready in room ${roomId}`);
     
-    console.log(`User ${userId} (${userName}) is ready in room ${roomId}`);
-    
-    // Note: This could be used to trigger specific actions when all users are ready
+    try {
+      const room = rooms.get(roomId);
+      if (!room) {
+        console.error(`Room ${roomId} not found for socket ${socket.id}`);
+        return;
+      }
+      
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id} in room ${roomId}`);
+        return;
+      }
+      
+      // Mark the peer as ready
+      peer.ready = true;
+      
+      // Notify all other peers in the room
+      socket.to(roomId).emit('userReady', {
+        userId,
+        userName: peer.userName
+      });
+      
+      console.log(`User ${userId} (${peer.userName}) is ready in room ${roomId}`);
+      
+      // Update the socket's last activity time
+      if (activeSockets.has(socket.id)) {
+        const socketData = activeSockets.get(socket.id);
+        socketData.lastActivity = Date.now();
+        activeSockets.set(socket.id, socketData);
+      }
+    } catch (error) {
+      console.error(`Error handling userReady for socket ${socket.id}:`, error);
+    }
   });
 
   socket.on('leaveRoom', () => {
     console.log(`leaveRoom requested by socket ${socket.id}`);
     handleUserLeaving(socket);
   });
-
-  socket.on('disconnect', () => {
-    console.log('Socket disconnected:', socket.id);
-    handleUserLeaving(socket);
-  });
-  
-  function handleUserLeaving(socket) {
-    const roomId = socket.data.roomId;
-    if (!roomId) return;
-    
-    const room = rooms.get(roomId);
-    if (!room) return;
-    
-    const peer = room.peers.get(socket.id);
-    if (!peer) return;
-    
-    socket.to(roomId).emit('userLeft', { userId: socket.data.userId });
-    
-    for (const key in peer.transports) {
-      try {
-        console.log(`Closing transport ${key} for socket ${socket.id}`);
-        peer.transports[key].close();
-      } catch (e) {
-        console.error(`Error closing transport ${key} for socket ${socket.id}:`, e);
-      }
-    }
-    
-    peer.producers.forEach(producer => {
-      try {
-        console.log(`Closing producer ${producer.id} for socket ${socket.id}`);
-        producer.close();
-      } catch (e) {
-        console.error(`Error closing producer ${producer.id} for socket ${socket.id}:`, e);
-      }
-      
-      socket.to(roomId).emit('producerClosed', {
-        remoteProducerId: producer.id,
-        userId: socket.data.userId
-      });
-    });
-    
-    peer.consumers.forEach(consumer => {
-      try {
-        console.log(`Closing consumer ${consumer.id} for socket ${socket.id}`);
-        consumer.close();
-      } catch (e) {
-        console.error(`Error closing consumer ${consumer.id} for socket ${socket.id}:`, e);
-      }
-    });
-    
-    room.peers.delete(socket.id);
-    socket.leave(roomId);
-    console.log(`User ${socket.data.userId} left room ${roomId}`);
-    
-    if (room.peers.size === 0) {
-      console.log(`Room ${roomId} is empty. Closing router and cleaning up room.`);
-      closeAndCleanupRoom(roomId);
-    }
-  }
-  
-  function findUserIdForProducer(producerId, room) {
-    for (const [socketId, peer] of room.peers.entries()) {
-      for (const [id, producer] of peer.producers.entries()) {
-        if (id === producerId) {
-          return peer.userId;
-        }
-      }
-    }
-    return null;
-  }
 });
 
 const PORT = process.env.PORT || 3001;
@@ -1024,10 +1069,91 @@ io.engine.on('connection_error', (err) => {
   console.error('Socket.io connection error:', err);
 });
 
-io.on('connection', (socket) => {
-  socket.on('ping', (callback) => {
-    if (typeof callback === 'function') {
-      callback();
+function handleUserLeaving(socket) {
+  const roomId = socket.data.roomId;
+  if (!roomId) return;
+  
+  const room = rooms.get(roomId);
+  if (!room) return;
+  
+  const peer = room.peers.get(socket.id);
+  if (!peer) return;
+  
+  socket.to(roomId).emit('userLeft', { userId: socket.data.userId });
+  
+  for (const key in peer.transports) {
+    try {
+      console.log(`Closing transport ${key} for socket ${socket.id}`);
+      peer.transports[key].close();
+    } catch (e) {
+      console.error(`Error closing transport ${key} for socket ${socket.id}:`, e);
+    }
+  }
+  
+  peer.producers.forEach(producer => {
+    try {
+      console.log(`Closing producer ${producer.id} for socket ${socket.id}`);
+      producer.close();
+    } catch (e) {
+      console.error(`Error closing producer ${producer.id} for socket ${socket.id}:`, e);
+    }
+    
+    socket.to(roomId).emit('producerClosed', {
+      remoteProducerId: producer.id,
+      userId: socket.data.userId
+    });
+  });
+  
+  peer.consumers.forEach(consumer => {
+    try {
+      console.log(`Closing consumer ${consumer.id} for socket ${socket.id}`);
+      consumer.close();
+    } catch (e) {
+      console.error(`Error closing consumer ${consumer.id} for socket ${socket.id}:`, e);
     }
   });
-});
+  
+  room.peers.delete(socket.id);
+  socket.leave(roomId);
+  console.log(`User ${socket.data.userId} left room ${roomId}`);
+  
+  if (room.peers.size === 0) {
+    console.log(`Room ${roomId} is empty. Closing router and cleaning up room.`);
+    closeAndCleanupRoom(roomId);
+  }
+}
+
+function findUserIdForProducer(producerId, room) {
+  for (const [socketId, peer] of room.peers.entries()) {
+    for (const [id, producer] of peer.producers.entries()) {
+      if (id === producerId) {
+        return peer.userId;
+      }
+    }
+  }
+  return null;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  
+  for (const [socketId, socketData] of activeSockets.entries()) {
+    const lastActivity = socketData.lastActivity || 0;
+    const inactiveTime = now - lastActivity;
+    
+    if (inactiveTime > 2 * 60 * 1000) {
+      const socket = socketData.socket;
+      
+      socket.emit('ping', () => {
+        socketData.lastActivity = Date.now();
+        activeSockets.set(socketId, socketData);
+      });
+      
+      if (inactiveTime > 5 * 60 * 1000) {
+        console.log(`Socket ${socketId} inactive for more than 5 minutes, cleaning up`);
+        handleUserLeaving(socket);
+        activeSockets.delete(socketId);
+      }
+    }
+  }
+}, 60000);

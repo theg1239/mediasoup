@@ -3,7 +3,7 @@
 const { io } = require('socket.io-client');
 
 const config = {
-  serverUrl: process.env.SERVER_URL || 'https://mediasoup-58e3bb17cad3.herokuapp.com/',
+  serverUrl: process.env.SERVER_URL || 'https://mediasoup-58e3bb17cad3.herokuapp.com',
   timeout: 10000 // 10 seconds
 };
 
@@ -108,15 +108,15 @@ function testRoomCreation() {
         userEmail: 'TU'
       });
       
-      socket.once('routerCapabilities', (data) => {
-        console.log('✅ Received router capabilities');
+      socket.once('routerRtpCapabilities', (data) => {
+        console.log('✅ Received router RTP capabilities');
         clearTimeout(timeout);
         socket.disconnect();
         resolve(true);
       });
       
       socket.once('error', (error) => {
-        console.error(`❌ Room creation error: ${error.message}`);
+        console.error(`Room creation error: ${error.message}`);
         clearTimeout(timeout);
         socket.disconnect();
         resolve(false);
@@ -124,7 +124,7 @@ function testRoomCreation() {
     });
     
     socket.on('connect_error', (error) => {
-      console.error(`❌ WebSocket connection error: ${error.message}`);
+      console.error(`WebSocket connection error: ${error.message}`);
       clearTimeout(timeout);
       socket.disconnect();
       resolve(false);
@@ -133,7 +133,7 @@ function testRoomCreation() {
 }
 
 async function runTests() {
-  console.log('🚀 Starting server tests...\n');
+  console.log('starting server tests...\n');
   
   const healthResult = await testHealthEndpoint();
   const socketResult = await testWebSocketConnection();
@@ -159,7 +159,6 @@ async function runTests() {
   process.exit(overallResult ? 0 : 1);
 }
 
-// Dynamically import node-fetch and then run tests
 let fetchFn;
 (async () => {
   try {
@@ -167,7 +166,7 @@ let fetchFn;
     fetchFn = fetchModule.default;
     await runTests();
   } catch (error) {
-    console.error("❌ Failed to load node-fetch dynamically:", error.message);
+    console.error("failed for nodefetch lol", error.message);
     process.exit(1);
   }
 })();
