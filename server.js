@@ -290,13 +290,15 @@ async function createWebRtcTransport(router) {
     maxIncomingBitrate
   } = mediasoupOptions.webRtcTransport;
   
+  // Set a timeout for transport creation
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       reject(new Error('Timeout creating WebRTC transport'));
     }, 10000);
     
     try {
-      router.createWebRtcTransport({
+      // Add more options for better connectivity
+      const transportOptions = {
         listenIps,
         enableUdp: true,
         enableTcp: true,
@@ -308,7 +310,22 @@ async function createWebRtcTransport(router) {
         // Add ICE timeout settings
         iceConsentTimeout: 60, // seconds
         iceRetransmissionTimeout: 1000, // ms
-      }).then(async (transport) => {
+        // Add additional ICE settings
+        additionalSettings: {
+          iceTransportPolicy: 'all',
+          iceCandidatePoolSize: 10,
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:stun.stunprotocol.org:3478' }
+          ]
+        }
+      };
+      
+      router.createWebRtcTransport(transportOptions).then(async (transport) => {
         clearTimeout(timeout);
         
         try {
@@ -316,19 +333,34 @@ async function createWebRtcTransport(router) {
             await transport.setMaxIncomingBitrate(maxIncomingBitrate);
           }
           
+          // Log transport creation
           console.log(`Transport created with ID: ${transport.id}`);
           
+          // Monitor transport for close events
           transport.on('routerclose', () => {
             console.log(`Transport ${transport.id} closed because router closed`);
           });
           
           transport.on('icestatechange', (iceState) => {
             console.log(`Transport ${transport.id} ICE state changed to ${iceState}`);
+            
+            // If ICE fails, try to restart it
+            if (iceState === 'failed') {
+              console.log(`Attempting to restart ICE for transport ${transport.id}`);
+              try {
+                transport.restartIce()
+                  .then(() => console.log(`ICE restarted for transport ${transport.id}`))
+                  .catch(error => console.error(`Error restarting ICE: ${error}`));
+              } catch (error) {
+                console.error(`Error attempting to restart ICE: ${error}`);
+              }
+            }
           });
           
           transport.on('dtlsstatechange', (dtlsState) => {
             console.log(`Transport ${transport.id} DTLS state changed to ${dtlsState}`);
             
+            // If the state is 'failed' or 'closed', log it
             if (dtlsState === 'failed' || dtlsState === 'closed') {
               console.error(`Transport ${transport.id} DTLS state is ${dtlsState}`);
             }
@@ -366,6 +398,7 @@ async function createWebRtcTransport(router) {
   });
 }
 
+// Helper to get a peer for a socket
 function getPeerForSocket(socket) {
   const roomId = socket.data.roomId;
   if (!roomId) return null;
@@ -536,6 +569,7 @@ io.on('connection', (socket) => {
         transportOptions.enableTcp = true;
       }
       
+      // Set a timeout for transport creation
       const transportCreationTimeout = setTimeout(() => {
         console.error(`Transport creation timed out for socket ${socket.id}`);
         if (callback) {
@@ -561,10 +595,12 @@ io.on('connection', (socket) => {
           return;
         }
         
+        // Store the transport
         peer.transports[transport.id] = transport;
         
         console.log(`Producer transport created for user ${socket.data.userId} on socket ${socket.id}`);
         
+        // Send the transport parameters back to the client
         if (callback) {
           callback(params);
         } else {
@@ -618,6 +654,7 @@ io.on('connection', (socket) => {
         return;
       }
       
+      // Set a timeout for the connection
       const connectionTimeout = setTimeout(() => {
         console.error(`Transport ${transportId} connection timed out`);
         socket.emit('error', { message: 'Transport connection timed out' });
@@ -694,13 +731,16 @@ io.on('connection', (socket) => {
       
       clearTimeout(productionTimeout);
       
+      // Store the producer
       peer.producers.set(producer.id, producer);
       
+      // Handle producer close
       producer.on('transportclose', () => {
         console.log(`Producer ${producer.id} closed because transport closed`);
         peer.producers.delete(producer.id);
       });
       
+      // Notify all other peers in the room about the new producer
       socket.to(roomId).emit('newProducer', {
         producerId: producer.id,
         userId: socket.data.userId,
@@ -724,40 +764,38 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('trickleCandidate', async ({ transportId, candidate }) => {
-    console.log(`Trickle ICE candidate received on socket ${socket.id} for transport ${transportId}`);
+  socket.on('trickleCandidate', ({ transportId, candidate }) => {
+    console.log(`Trickle ICE candidate received for transport ${transportId} from socket ${socket.id}`);
+    
     try {
-      const peer = getPeerForSocket(socket);
-      if (!peer) {
-        console.error(`Peer not found for socket ${socket.id} in trickleCandidate`);
+      const { roomId } = socket.data;
+      const room = rooms.get(roomId);
+      
+      if (!room) {
+        console.error(`Room ${roomId} not found for socket ${socket.id}`);
         return;
       }
       
-      let transport = null;
-      if (peer.transports.producer && peer.transports.producer.id === transportId) {
-        transport = peer.transports.producer;
-      } else {
-        for (const [_, t] of Object.entries(peer.transports)) {
-          if (t.id === transportId) {
-            transport = t;
-            break;
-          }
-        }
+      const peer = room.peers.get(socket.id);
+      
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id} in room ${roomId}`);
+        return;
       }
+      
+      const transport = peer.transports[transportId];
       
       if (!transport) {
-        console.error(`Transport ${transportId} not found for trickle candidate on socket ${socket.id}`);
+        console.error(`Transport ${transportId} not found for socket ${socket.id}`);
         return;
       }
       
-      try {
-        await transport.addIceCandidate(candidate);
-        console.log(`Added ICE candidate to transport ${transportId} on socket ${socket.id}`);
-      } catch (error) {
-        console.error(`Error adding ICE candidate on transport ${transportId}:`, error);
-      }
+      transport.addIceCandidate(candidate)
+        .catch(error => {
+          console.error(`Error adding ICE candidate for transport ${transportId}:`, error);
+        });
     } catch (error) {
-      console.error(`Error in trickleCandidate: ${error.message}`);
+      console.error(`Error handling trickle ICE candidate:`, error);
     }
   });
 
@@ -1007,6 +1045,95 @@ io.on('connection', (socket) => {
     console.log(`leaveRoom requested by socket ${socket.id}`);
     handleUserLeaving(socket);
   });
+
+  // Add a function to handle ICE restart
+  socket.on('restartIce', async ({ transportId }) => {
+    console.log(`ICE restart requested for transport ${transportId} by socket ${socket.id}`);
+    
+    try {
+      const { roomId } = socket.data;
+      const room = rooms.get(roomId);
+      
+      if (!room) {
+        console.error(`Room ${roomId} not found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Room not found' });
+        return;
+      }
+      
+      const peer = room.peers.get(socket.id);
+      
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id} in room ${roomId}`);
+        socket.emit('error', { message: 'Peer not found' });
+        return;
+      }
+      
+      const transport = peer.transports[transportId];
+      
+      if (!transport) {
+        console.error(`Transport ${transportId} not found for socket ${socket.id}`);
+        socket.emit('error', { message: 'Transport not found' });
+        return;
+      }
+      
+      // Restart ICE
+      const iceParameters = await transport.restartIce();
+      
+      console.log(`ICE restarted for transport ${transportId}`);
+      socket.emit('iceRestarted', { transportId, iceParameters });
+    } catch (error) {
+      console.error(`Error restarting ICE for transport ${transportId}:`, error);
+      socket.emit('error', { message: 'Failed to restart ICE', error: error.message });
+    }
+  });
+
+  // Add a function to check transport status
+  socket.on('checkTransportStatus', ({ transportId }, callback) => {
+    console.log(`Transport status check requested for ${transportId} by socket ${socket.id}`);
+    
+    try {
+      const { roomId } = socket.data;
+      const room = rooms.get(roomId);
+      
+      if (!room) {
+        console.error(`Room ${roomId} not found for socket ${socket.id}`);
+        if (callback) callback({ error: 'Room not found' });
+        return;
+      }
+      
+      const peer = room.peers.get(socket.id);
+      
+      if (!peer) {
+        console.error(`Peer not found for socket ${socket.id} in room ${roomId}`);
+        if (callback) callback({ error: 'Peer not found' });
+        return;
+      }
+      
+      const transport = peer.transports[transportId];
+      
+      if (!transport) {
+        console.error(`Transport ${transportId} not found for socket ${socket.id}`);
+        if (callback) callback({ error: 'Transport not found' });
+        return;
+      }
+      
+      const status = {
+        id: transport.id,
+        connectionState: transport.connectionState,
+        iceState: transport.iceState,
+        dtlsState: transport.dtlsState,
+        sctpState: transport.sctpState,
+        iceCandidates: transport.iceCandidates,
+        iceParameters: transport.iceParameters,
+        dtlsParameters: transport.dtlsParameters
+      };
+      
+      if (callback) callback({ status });
+    } catch (error) {
+      console.error(`Error checking transport status:`, error);
+      if (callback) callback({ error: error.message });
+    }
+  });
 });
 
 const PORT = process.env.PORT || 3001;
@@ -1134,21 +1261,27 @@ function findUserIdForProducer(producerId, room) {
   return null;
 }
 
+// Add a heartbeat mechanism to keep connections alive
 setInterval(() => {
   const now = Date.now();
   
+  // Check for stale connections
   for (const [socketId, socketData] of activeSockets.entries()) {
     const lastActivity = socketData.lastActivity || 0;
     const inactiveTime = now - lastActivity;
     
+    // If inactive for more than 2 minutes, check if it's still alive
     if (inactiveTime > 2 * 60 * 1000) {
       const socket = socketData.socket;
       
+      // Ping the socket to see if it's still alive
       socket.emit('ping', () => {
+        // If we get a response, update the last activity time
         socketData.lastActivity = Date.now();
         activeSockets.set(socketId, socketData);
       });
       
+      // If inactive for more than 5 minutes, consider it dead and clean up
       if (inactiveTime > 5 * 60 * 1000) {
         console.log(`Socket ${socketId} inactive for more than 5 minutes, cleaning up`);
         handleUserLeaving(socket);
@@ -1156,4 +1289,4 @@ setInterval(() => {
       }
     }
   }
-}, 60000);
+}, 60000); // Check every minute
