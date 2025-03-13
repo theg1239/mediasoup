@@ -13,7 +13,6 @@ require("dotenv").config();
 const app = express();
 const LOG_PREFIX = "[MediasoupServer]";
 
-
 const sslOptions = {
   key: fs.readFileSync(path.join(__dirname, "mediasoup-certs1", "privkey.pem")),
   cert: fs.readFileSync(path.join(__dirname, "mediasoup-certs1", "fullchain.pem"))
@@ -415,25 +414,37 @@ io.on("connection", (socket) => {
         }
       }
       socket.emit("roomUsers", participants);
-      socket.to(roomName).emit("userJoined", {
-        userId,
-        userName,
-        userInitials: userName.substring(0, 2)
-      });
-      // Use toJSON() if available, else send raw capabilities.
+
+      const existingProducers = [];
+      for (const [id, peer] of room.peers.entries()) {
+        if (peer.socket.id !== socket.id) {
+          for (const [producerId] of peer.producers.entries()) {
+            existingProducers.push({
+              producerId,
+              producerUserId: peer.userId
+            });
+          }
+        }
+      }
+
       const rtpCaps = (room.router &&
         typeof room.router.rtpCapabilities.toJSON === "function")
         ? room.router.rtpCapabilities.toJSON()
         : room.router.rtpCapabilities;
       console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
-      callback({ rtpCapabilities: rtpCaps });
+      callback({ rtpCapabilities: rtpCaps, existingProducers });
+      
+      socket.to(roomName).emit("userJoined", {
+        userId,
+        userName,
+        userInitials: userName.substring(0, 2)
+      });
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
       socket.emit("error", { message: "Failed to join room", error: error.message });
     }
   });
 
-  // getRouterRtpCapabilities: send back RTP capabilities.
   socket.on("getRouterRtpCapabilities", (data, callback) => {
     const room = rooms.get(socket.data.roomName);
     if (room) {
@@ -468,6 +479,10 @@ io.on("connection", (socket) => {
       });
       peer.producers.set(producer.id, producer);
       callback({ id: producer.id });
+      socket.to(socket.data.roomName).emit("new-producer", {
+        producerId: producer.id,
+        producerUserId: socket.data.userId
+      });
     } catch (error) {
       callback({ error: error.message });
     }
