@@ -528,25 +528,32 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Create consumer transports for existing producers
+      // Create consumer transports and consumers for existing producers
       for (const producerInfo of existingProducers) {
         try {
+          // Create transport
           const transport = await createWebRtcTransport(room.router);
           peer.transports[transport.transport.id] = transport.transport;
           
-          // Emit the event with transport parameters and a callback
+          // Emit transport parameters to client
           socket.emit("createWebRtcTransport", 
             { 
               consumer: true,
               params: transport.params
-            }, 
-            (response) => {
-              if (response && response.error) {
-                console.error(`${LOG_PREFIX} Error in createWebRtcTransport callback:`, response.error);
-              }
             }
           );
-          
+
+          // Wait for client to connect transport
+          await new Promise((resolve) => {
+            socket.once("transport-recv-connect", async (data) => {
+              if (data.serverConsumerTransportId === transport.transport.id) {
+                await transport.transport.connect({ dtlsParameters: data.dtlsParameters });
+                resolve();
+              }
+            });
+          });
+
+          // Create consumer
           const consumer = await transport.transport.consume({
             producerId: producerInfo.producerId,
             rtpCapabilities: room.router.rtpCapabilities
@@ -561,6 +568,16 @@ io.on("connection", (socket) => {
             rtpParameters: consumer.rtpParameters,
             serverConsumerId: consumer.id
           });
+
+          await new Promise((resolve) => {
+            socket.once("consumer-resume", async (data) => {
+              if (data.serverConsumerId === consumer.id) {
+                await consumer.resume();
+                resolve();
+              }
+            });
+          });
+
         } catch (error) {
           console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
         }
