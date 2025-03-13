@@ -13,17 +13,21 @@ require("dotenv").config();
 const app = express();
 const LOG_PREFIX = "[MediasoupServer]";
 
+
 const sslOptions = {
-  key: fs.readFileSync(path.join(__dirname, "mediasoup-certs", "key.pem")),
-  cert: fs.readFileSync(path.join(__dirname, "mediasoup-certs", "cert.pem"))
+  key: fs.readFileSync(path.join(__dirname, "mediasoup-certs1", "privkey.pem")),
+  cert: fs.readFileSync(path.join(__dirname, "mediasoup-certs1", "fullchain.pem"))
 };
 
+// ------------------------------
+// CORS Options
+// ------------------------------
 const corsOptions = {
   origin: (origin, callback) => {
     console.log(`${LOG_PREFIX} CORS check for origin: ${origin}`);
     const allowedOrigins = [
       "http://localhost:3000",
-      process.env.FRONTEND_URL || "*",
+      process.env.FRONTEND_URL || "*"
     ];
     if (!origin) {
       console.log(`${LOG_PREFIX} No origin provided, allowing by default.`);
@@ -39,11 +43,14 @@ const corsOptions = {
   },
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
   credentials: true,
-  optionsSuccessStatus: 204,
+  optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
 
+// ------------------------------
+// Health & Static Endpoints
+// ------------------------------
 app.get("/health", (req, res) => {
   console.log(`${LOG_PREFIX} Health check requested`);
   res.status(200).json({ status: "ok", uptime: process.uptime() });
@@ -64,17 +71,22 @@ app.get("/", (req, res) => {
   `);
 });
 
+// ------------------------------
+// Create HTTPS Server & Socket.IO Instance
+// ------------------------------
 const server = https.createServer(sslOptions, app);
 const io = socketIo(server, {
   cors: corsOptions,
   pingTimeout: 60000,
   pingInterval: 25000,
-  transports: ["websocket", "polling"],
+  transports: ["websocket", "polling"]
 });
 
 console.log(`${LOG_PREFIX} HTTPS and Socket.IO server initialized`);
 
-
+// ------------------------------
+// Helper: Get Listen IPs for mediasoup
+// ------------------------------
 function getListenIps() {
   console.log(`${LOG_PREFIX} Determining listen IPs for mediasoup...`);
   const interfaces = os.networkInterfaces();
@@ -89,12 +101,15 @@ function getListenIps() {
   return listenIps;
 }
 
+// ------------------------------
+// Mediasoup Options
+// ------------------------------
 const mediasoupOptions = {
   worker: {
     rtcMinPort: Number(process.env.RTC_MIN_PORT) || 40000,
     rtcMaxPort: Number(process.env.RTC_MAX_PORT) || 49999,
     logLevel: process.env.LOG_LEVEL || "warn",
-    logTags: ["info", "ice", "dtls", "rtp", "srtp", "rtcp", "verbose"],
+    logTags: ["info", "ice", "dtls", "rtp", "srtp", "rtcp", "verbose"]
   },
   router: {
     mediaCodecs: [
@@ -102,7 +117,7 @@ const mediasoupOptions = {
         kind: "audio",
         mimeType: "audio/opus",
         clockRate: 48000,
-        channels: 2,
+        channels: 2
       },
       {
         kind: "video",
@@ -111,8 +126,8 @@ const mediasoupOptions = {
         parameters: {
           "x-google-start-bitrate": 1000,
           "x-google-min-bitrate": 600,
-          "x-google-max-bitrate": 3000,
-        },
+          "x-google-max-bitrate": 3000
+        }
       },
       {
         kind: "video",
@@ -122,8 +137,8 @@ const mediasoupOptions = {
           "x-google-start-bitrate": 1000,
           "profile-id": 2,
           "x-google-min-bitrate": 600,
-          "x-google-max-bitrate": 3000,
-        },
+          "x-google-max-bitrate": 3000
+        }
       },
       {
         kind: "video",
@@ -135,10 +150,10 @@ const mediasoupOptions = {
           "level-asymmetry-allowed": 1,
           "x-google-start-bitrate": 1000,
           "x-google-min-bitrate": 600,
-          "x-google-max-bitrate": 3000,
-        },
-      },
-    ],
+          "x-google-max-bitrate": 3000
+        }
+      }
+    ]
   },
   webRtcTransport: {
     listenIps: getListenIps(),
@@ -148,16 +163,23 @@ const mediasoupOptions = {
     initialAvailableOutgoingBitrate: 1000000,
     minimumAvailableOutgoingBitrate: 600000,
     maxSctpMessageSize: 262144,
-    maxIncomingBitrate: 1500000,
-  },
+    maxIncomingBitrate: 1500000
+  }
 };
 
 console.log(`${LOG_PREFIX} Mediasoup options configured:`, mediasoupOptions);
 
+// ------------------------------
+// Global Worker/Room Collections
+// ------------------------------
 const roomsInCreation = new Map();
 let workers = [];
 const workerLoadCount = new Map();
+const rooms = new Map();
 
+// ------------------------------
+// Create Mediasoup Workers
+// ------------------------------
 async function createWorkers() {
   console.log(`${LOG_PREFIX} Starting creation of mediasoup workers...`);
   const numWorkers = Number(process.env.NUM_WORKERS) || 1;
@@ -212,7 +234,8 @@ async function createWorkers() {
 })();
 
 function getLeastLoadedWorker() {
-  if (workers.length === 0) throw new Error(`${LOG_PREFIX} No mediasoup workers available`);
+  if (workers.length === 0)
+    throw new Error(`${LOG_PREFIX} No mediasoup workers available`);
   const sorted = [...workerLoadCount.entries()].sort((a, b) => a[1] - b[1]);
   const [worker, load] = sorted[0];
   workerLoadCount.set(worker, load + 1);
@@ -230,8 +253,9 @@ function releaseWorker(worker) {
   }
 }
 
-const rooms = new Map();
-
+// ------------------------------
+// Room Management
+// ------------------------------
 async function getOrCreateRoom(roomName) {
   console.log(`${LOG_PREFIX} getOrCreateRoom called for room: ${roomName}`);
   let room = rooms.get(roomName);
@@ -254,7 +278,7 @@ async function getOrCreateRoom(roomName) {
         router,
         worker,
         peers: new Map(),
-        creationTime: Date.now(),
+        creationTime: Date.now()
       };
       rooms.set(roomName, room);
       resolve(room);
@@ -270,6 +294,9 @@ async function getOrCreateRoom(roomName) {
   return promise;
 }
 
+// ------------------------------
+// Create WebRTC Transport
+// ------------------------------
 async function createWebRtcTransport(router) {
   console.log(`${LOG_PREFIX} Creating WebRTC transport on router ${router.id}`);
   const { listenIps, initialAvailableOutgoingBitrate, maxIncomingBitrate } = mediasoupOptions.webRtcTransport;
@@ -299,9 +326,9 @@ async function createWebRtcTransport(router) {
           { urls: "stun:stun2.l.google.com:19302" },
           { urls: "stun:stun3.l.google.com:19302" },
           { urls: "stun:stun4.l.google.com:19302" },
-          { urls: "stun:stun.stunprotocol.org:3478" },
-        ],
-      },
+          { urls: "stun:stun.stunprotocol.org:3478" }
+        ]
+      }
     };
     router.createWebRtcTransport(transportOptions)
       .then(async (transport) => {
@@ -311,7 +338,9 @@ async function createWebRtcTransport(router) {
           await transport.setMaxIncomingBitrate(maxIncomingBitrate);
           console.log(`${LOG_PREFIX} Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
         }
-        transport.on("routerclose", () => console.log(`${LOG_PREFIX} Transport ${transport.id} closed (router closed)`));
+        transport.on("routerclose", () =>
+          console.log(`${LOG_PREFIX} Transport ${transport.id} closed (router closed)`)
+        );
         transport.on("icestatechange", (state) => {
           console.log(`${LOG_PREFIX} Transport ${transport.id} ICE state: ${state}`);
           if (state === "failed") {
@@ -333,8 +362,8 @@ async function createWebRtcTransport(router) {
             iceParameters: transport.iceParameters,
             iceCandidates: transport.iceCandidates,
             dtlsParameters: transport.dtlsParameters,
-            sctpParameters: transport.sctpParameters,
-          },
+            sctpParameters: transport.sctpParameters
+          }
         });
       })
       .catch((error) => {
@@ -345,10 +374,14 @@ async function createWebRtcTransport(router) {
   });
 }
 
+// ------------------------------
+// Socket & Room Management
+// ------------------------------
 io.on("connection", (socket) => {
   console.log(`${LOG_PREFIX} New socket connection: ${socket.id}`);
   socket.data = {};
 
+  // joinRoom: add peer to room, send back RTP capabilities and notify others.
   socket.on("joinRoom", async (data, callback) => {
     try {
       const { roomName, userId, userName, userEmail } = data;
@@ -365,18 +398,19 @@ io.on("connection", (socket) => {
         consumers: new Map(),
         userId,
         userName,
-        userEmail,
+        userEmail
       });
       socket.join(roomName);
       console.log(`${LOG_PREFIX} User ${userId} (${userName}) joined room ${roomName}`);
 
+      // Build participants list (excluding current user).
       const participants = [];
       for (const [id, peer] of room.peers.entries()) {
         if (peer.userId !== userId) {
           participants.push({
             userId: peer.userId,
             userName: peer.userName,
-            userInitials: peer.userName.substring(0, 2),
+            userInitials: peer.userName.substring(0, 2)
           });
         }
       }
@@ -384,28 +418,41 @@ io.on("connection", (socket) => {
       socket.to(roomName).emit("userJoined", {
         userId,
         userName,
-        userInitials: userName.substring(0, 2),
+        userInitials: userName.substring(0, 2)
       });
-      callback({ rtpCapabilities: room.router.rtpCapabilities.toJSON() });
+      // Use toJSON() if available, else send raw capabilities.
+      const rtpCaps = (room.router &&
+        typeof room.router.rtpCapabilities.toJSON === "function")
+        ? room.router.rtpCapabilities.toJSON()
+        : room.router.rtpCapabilities;
+      console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
+      callback({ rtpCapabilities: rtpCaps });
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
       socket.emit("error", { message: "Failed to join room", error: error.message });
     }
   });
 
+  // getRouterRtpCapabilities: send back RTP capabilities.
   socket.on("getRouterRtpCapabilities", (data, callback) => {
     const room = rooms.get(socket.data.roomName);
     if (room) {
-      callback({ rtpCapabilities: room.router.rtpCapabilities.toJSON() });
+      const rtpCaps = (room.router &&
+        typeof room.router.rtpCapabilities.toJSON === "function")
+        ? room.router.rtpCapabilities.toJSON()
+        : room.router.rtpCapabilities;
+      callback({ rtpCapabilities: rtpCaps });
     } else {
       callback({ rtpCapabilities: null });
     }
   });
 
+  // transport-connect: acknowledge connection.
   socket.on("transport-connect", (data, callback) => {
     callback();
   });
 
+  // transport-produce: create a producer.
   socket.on("transport-produce", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
@@ -417,7 +464,7 @@ io.on("connection", (socket) => {
       const producer = await transport.produce({
         kind: data.kind,
         rtpParameters: data.rtpParameters,
-        appData: data.appData,
+        appData: data.appData
       });
       peer.producers.set(producer.id, producer);
       callback({ id: producer.id });
@@ -426,10 +473,12 @@ io.on("connection", (socket) => {
     }
   });
 
+  // transport-recv-connect: acknowledge consumer transport connection.
   socket.on("transport-recv-connect", (data, callback) => {
     callback();
   });
 
+  // consume: create a consumer for a remote producer.
   socket.on("consume", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
@@ -440,7 +489,7 @@ io.on("connection", (socket) => {
       if (!consumerTransport) throw new Error("Consumer transport not found");
       const consumer = await consumerTransport.consume({
         producerId: data.remoteProducerId,
-        rtpCapabilities: data.rtpCapabilities,
+        rtpCapabilities: data.rtpCapabilities
       });
       peer.consumers.set(consumer.id, consumer);
       callback({
@@ -448,17 +497,19 @@ io.on("connection", (socket) => {
         producerId: data.remoteProducerId,
         kind: consumer.kind,
         rtpParameters: consumer.rtpParameters,
-        serverConsumerId: consumer.id,
+        serverConsumerId: consumer.id
       });
     } catch (error) {
       callback({ error: error.message });
     }
   });
 
+  // consumer-resume: acknowledge resume.
   socket.on("consumer-resume", (data, callback) => {
     callback();
   });
 
+  // restartIce: perform ICE restart.
   socket.on("restartIce", async (data) => {
     try {
       const room = rooms.get(socket.data.roomName);
@@ -480,6 +531,9 @@ io.on("connection", (socket) => {
   });
 });
 
+// ------------------------------
+// Helper: Handle Peer Leaving
+// ------------------------------
 function handleUserLeaving(socket) {
   const roomName = socket.data.roomName;
   if (!roomName) return;
@@ -534,6 +588,9 @@ async function closeAndCleanupRoom(roomName) {
   console.log(`${LOG_PREFIX} Room ${roomName} removed from active rooms`);
 }
 
+// ------------------------------
+// Start Server
+// ------------------------------
 const PORT = process.env.PORT || 3002;
 server.listen(PORT, () => {
   console.log(`${LOG_PREFIX} Server is running on port ${PORT}`);
