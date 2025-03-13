@@ -530,11 +530,18 @@ io.on("connection", (socket) => {
           const transport = await createWebRtcTransport(room.router);
           peer.transports[transport.transport.id] = transport.transport;
           
-          socket.emit("createWebRtcTransport", { consumer: true }, (response) => {
-            if (response && response.error) {
-              console.error(`${LOG_PREFIX} Error in createWebRtcTransport callback:`, response.error);
+          // Emit the event with transport parameters and a callback
+          socket.emit("createWebRtcTransport", 
+            { 
+              consumer: true,
+              params: transport.params
+            }, 
+            (response) => {
+              if (response && response.error) {
+                console.error(`${LOG_PREFIX} Error in createWebRtcTransport callback:`, response.error);
+              }
             }
-          });
+          );
           
           const consumer = await transport.transport.consume({
             producerId: producerInfo.producerId,
