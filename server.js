@@ -78,7 +78,19 @@ const io = socketIo(server, {
   cors: corsOptions,
   pingTimeout: 60000,
   pingInterval: 25000,
-  transports: ["websocket", "polling"]
+  transports: ["websocket", "polling"],
+  allowEIO3: true,
+  allowUpgrades: true,
+  maxHttpBufferSize: 1e8,
+  connectTimeout: 30000,
+  upgradeTimeout: 30000,
+  cookie: {
+    name: "io",
+    httpOnly: true,
+    sameSite: "lax",
+    secure: true,
+    maxAge: 86400000
+  }
 });
 
 console.log(`${LOG_PREFIX} HTTPS and Socket.IO server initialized`);
@@ -752,7 +764,9 @@ io.on("connection", (socket) => {
   });
 });
 
-
+// ------------------------------
+// Helper: Handle Peer Leaving
+// ------------------------------
 function handleUserLeaving(socket) {
   const roomName = socket.data.roomName;
   if (!roomName) return;
@@ -807,6 +821,9 @@ async function closeAndCleanupRoom(roomName) {
   console.log(`${LOG_PREFIX} Room ${roomName} removed from active rooms`);
 }
 
+// ------------------------------
+// Start Server
+// ------------------------------
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`${LOG_PREFIX} Server is running on port ${PORT}`);
@@ -825,6 +842,43 @@ io.on("error", (error) => {
 
 io.engine.on("connection_error", (err) => {
   console.error(`${LOG_PREFIX} Socket.io connection error:`, err);
+  if (err.code === 1) {
+    console.error(`${LOG_PREFIX} Transport error:`, err.message);
+  } else if (err.code === 2) {
+    console.error(`${LOG_PREFIX} Protocol error:`, err.message);
+  }
+});
+
+io.engine.on("upgradeError", (err) => {
+  console.error(`${LOG_PREFIX} Socket.io upgrade error:`, err);
+});
+
+io.engine.on("transportError", (err) => {
+  console.error(`${LOG_PREFIX} Socket.io transport error:`, err);
+});
+
+io.engine.on("wsError", (err) => {
+  console.error(`${LOG_PREFIX} Socket.io websocket error:`, err);
+});
+
+io.engine.on("close", (err) => {
+  console.error(`${LOG_PREFIX} Socket.io connection closed:`, err);
+});
+
+io.use((socket, next) => {
+  const clientVersion = socket.handshake.headers["x-client-version"];
+  const clientType = socket.handshake.headers["x-client-type"];
+  console.log(`${LOG_PREFIX} Client connected with version: ${clientVersion}, type: ${clientType}`);
+  next();
+});
+
+io.use((socket, next) => {
+  const clientTime = socket.handshake.query.clientTime;
+  if (clientTime) {
+    const timeDiff = Date.now() - parseInt(clientTime);
+    console.log(`${LOG_PREFIX} Client time difference: ${timeDiff}ms`);
+  }
+  next();
 });
 
 process.on("SIGINT", cleanupAndExit);
