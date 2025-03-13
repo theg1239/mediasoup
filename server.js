@@ -457,9 +457,17 @@ io.on("connection", (socket) => {
   socket.on("createWebRtcTransport", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
+      if (!room) {
+        console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
+        callback({ error: "Room not found" });
+        return;
+      }
       const peer = room.peers.get(socket.id);
-      if (!peer) throw new Error("Peer not found");
+      if (!peer) {
+        console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
+        callback({ error: "Peer not found" });
+        return;
+      }
 
       console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.data.userId}`);
       const transport = await createWebRtcTransport(room.router);
@@ -467,7 +475,15 @@ io.on("connection", (socket) => {
       peer.transports[transport.transport.id] = transport.transport;
       console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.transport.id}`);
       
-      callback(transport.params);
+      callback({
+        params: {
+          id: transport.transport.id,
+          iceParameters: transport.transport.iceParameters,
+          iceCandidates: transport.transport.iceCandidates,
+          dtlsParameters: transport.transport.dtlsParameters,
+          sctpParameters: transport.transport.sctpParameters
+        }
+      });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
       callback({ error: error.message });
