@@ -690,19 +690,38 @@ io.on("connection", (socket) => {
   socket.on("transport-recv-connect", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
+      if (!room) {
+        if (typeof callback === 'function') {
+          callback({ error: "Room not found" });
+        }
+        return;
+      }
       const peer = room.peers.get(socket.id);
-      if (!peer) throw new Error("Peer not found");
+      if (!peer) {
+        if (typeof callback === 'function') {
+          callback({ error: "Peer not found" });
+        }
+        return;
+      }
       
       const transport = peer.transports[data.serverConsumerTransportId];
-      if (!transport) throw new Error("Consumer transport not found");
+      if (!transport) {
+        if (typeof callback === 'function') {
+          callback({ error: "Consumer transport not found" });
+        }
+        return;
+      }
       
       console.log(`${LOG_PREFIX} Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.data.userId}`);
       await transport.connect({ dtlsParameters: data.dtlsParameters });
-      callback();
+      if (typeof callback === 'function') {
+        callback();
+      }
     } catch (error) {
       console.error(`${LOG_PREFIX} Error connecting consumer transport:`, error);
-      callback({ error: error.message });
+      if (typeof callback === 'function') {
+        callback({ error: error.message });
+      }
     }
   });
 
@@ -710,12 +729,27 @@ io.on("connection", (socket) => {
   socket.on("consume", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
+      if (!room) {
+        if (typeof callback === 'function') {
+          callback({ error: "Room not found" });
+        }
+        return;
+      }
       const peer = room.peers.get(socket.id);
-      if (!peer) throw new Error("Peer not found");
+      if (!peer) {
+        if (typeof callback === 'function') {
+          callback({ error: "Peer not found" });
+        }
+        return;
+      }
       
       const consumerTransport = peer.transports[data.serverConsumerTransportId];
-      if (!consumerTransport) throw new Error("Consumer transport not found");
+      if (!consumerTransport) {
+        if (typeof callback === 'function') {
+          callback({ error: "Consumer transport not found" });
+        }
+        return;
+      }
       
       console.log(`${LOG_PREFIX} Creating consumer for producer ${data.remoteProducerId} for user ${socket.data.userId}`);
       
@@ -727,16 +761,20 @@ io.on("connection", (socket) => {
       peer.consumers.set(consumer.id, consumer);
       console.log(`${LOG_PREFIX} Consumer created: ${consumer.id} for user ${socket.data.userId}`);
       
-      callback({
-        id: consumer.id,
-        producerId: data.remoteProducerId,
-        kind: consumer.kind,
-        rtpParameters: consumer.rtpParameters,
-        serverConsumerId: consumer.id
-      });
+      if (typeof callback === 'function') {
+        callback({
+          id: consumer.id,
+          producerId: data.remoteProducerId,
+          kind: consumer.kind,
+          rtpParameters: consumer.rtpParameters,
+          serverConsumerId: consumer.id
+        });
+      }
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating consumer:`, error);
-      callback({ error: error.message });
+      if (typeof callback === 'function') {
+        callback({ error: error.message });
+      }
     }
   });
 
@@ -744,17 +782,36 @@ io.on("connection", (socket) => {
   socket.on("consumer-resume", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
+      if (!room) {
+        if (typeof callback === 'function') {
+          callback({ error: "Room not found" });
+        }
+        return;
+      }
       const peer = room.peers.get(socket.id);
-      if (!peer) throw new Error("Peer not found");
+      if (!peer) {
+        if (typeof callback === 'function') {
+          callback({ error: "Peer not found" });
+        }
+        return;
+      }
       
       const consumer = peer.consumers.get(data.serverConsumerId);
-      if (!consumer) throw new Error("Consumer not found");
+      if (!consumer) {
+        if (typeof callback === 'function') {
+          callback({ error: "Consumer not found" });
+        }
+        return;
+      }
       
       await consumer.resume();
-      callback();
+      if (typeof callback === 'function') {
+        callback();
+      }
     } catch (error) {
-      callback({ error: error.message });
+      if (typeof callback === 'function') {
+        callback({ error: error.message });
+      }
     }
   });
 
