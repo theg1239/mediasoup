@@ -444,30 +444,32 @@ io.on("connection", (socket) => {
         userInitials: userName.substring(0, 2)
       });
 
-      for (const producerInfo of existingProducers) {
-        try {
-          const transport = await createWebRtcTransport(room.router);
-          room.peers.get(socket.id).transports[transport.transport.id] = transport.transport;
-          
-          socket.emit("createWebRtcTransport", { consumer: true }, transport.params);
-          
-          const consumer = await transport.transport.consume({
-            producerId: producerInfo.producerId,
-            rtpCapabilities: rtpCaps
-          });
-          
-          room.peers.get(socket.id).consumers.set(consumer.id, consumer);
-          
-          socket.emit("consume", {
-            id: consumer.id,
-            producerId: producerInfo.producerId,
-            kind: consumer.kind,
-            rtpParameters: consumer.rtpParameters
-          });
-        } catch (error) {
-          console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
+      socket.once("deviceReady", async () => {
+        for (const producerInfo of existingProducers) {
+          try {
+            const transport = await createWebRtcTransport(room.router);
+            room.peers.get(socket.id).transports[transport.transport.id] = transport.transport;
+            
+            socket.emit("createWebRtcTransport", { consumer: true }, transport.params);
+            
+            const consumer = await transport.transport.consume({
+              producerId: producerInfo.producerId,
+              rtpCapabilities: rtpCaps
+            });
+            
+            room.peers.get(socket.id).consumers.set(consumer.id, consumer);
+            
+            socket.emit("consume", {
+              id: consumer.id,
+              producerId: producerInfo.producerId,
+              kind: consumer.kind,
+              rtpParameters: consumer.rtpParameters
+            });
+          } catch (error) {
+            console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
+          }
         }
-      }
+      });
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
       socket.emit("error", { message: "Failed to join room", error: error.message });
