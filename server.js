@@ -634,26 +634,20 @@ io.on("connection", (socket) => {
       const room = rooms.get(socket.data.roomName);
       if (!room) {
         console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Room not found" });
-        }
+        safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
         console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Peer not found" });
-        }
+        safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       const transport = peer.transports[data.transportId];
       if (!transport) {
         console.error(`${LOG_PREFIX} Transport not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Transport not found" });
-        }
+        safeCallback(callback, { error: "Transport not found" });
         return;
       }
       
@@ -675,14 +669,10 @@ io.on("connection", (socket) => {
         kind: producer.kind
       });
       
-      if (typeof callback === 'function') {
-        callback({ id: producer.id });
-      }
+      safeCallback(callback, { id: producer.id });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating producer:`, error);
-      if (typeof callback === 'function') {
-        callback({ error: error.message });
-      }
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -963,3 +953,13 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
   next();
 });
+
+function safeCallback(callback, data) {
+  if (typeof callback === 'function') {
+    try {
+      callback(data);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error in callback:`, error);
+    }
+  }
+}
