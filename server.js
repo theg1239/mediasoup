@@ -4,7 +4,8 @@
 // Required Modules & Environment Setup
 // ------------------------------
 const express = require("express");
-const http = require("http");
+const https = require("https");
+const fs = require("fs");
 const cors = require("cors");
 const socketIo = require("socket.io");
 const mediasoup = require("mediasoup");
@@ -16,6 +17,16 @@ const app = express();
 
 // Global log prefix for easier filtering
 const LOG_PREFIX = "[MediasoupServer]";
+
+// ------------------------------
+// Load SSL Certificates
+// ------------------------------
+// Update the file paths to match where your certs are located.
+// For example, if you generated them using the instructions and stored them in ./certs folder:
+const sslOptions = {
+  key: fs.readFileSync(path.join(__dirname, "certs", "key.pem")),
+  cert: fs.readFileSync(path.join(__dirname, "certs", "cert.pem"))
+};
 
 // ------------------------------
 // CORS Options (adapt as needed)
@@ -70,17 +81,17 @@ app.get("/", (req, res) => {
 });
 
 // ------------------------------
-// Create HTTP Server and Socket.IO Instance
+// Create HTTPS Server and Socket.IO Instance
 // ------------------------------
-const server = http.createServer(app);
+const server = https.createServer(sslOptions, app);
 const io = socketIo(server, {
   cors: corsOptions,
-  pingTimeout: 60000,
-  pingInterval: 25000,
+  pingTimeout: 60000, // Longer ping timeout
+  pingInterval: 25000, // More frequent pings
   transports: ["websocket", "polling"],
 });
 
-console.log(`${LOG_PREFIX} HTTP and Socket.IO server initialized`);
+console.log(`${LOG_PREFIX} HTTPS and Socket.IO server initialized`);
 
 // ------------------------------
 // Helper: Determine which IPs mediasoup should listen on
@@ -91,10 +102,12 @@ function getListenIps() {
   console.log(`${LOG_PREFIX} Available network interfaces:`, interfaces);
   const listenIps = [];
   const publicIp = process.env.ANNOUNCED_IP || null;
+
   listenIps.push({
     ip: "0.0.0.0",
     announcedIp: publicIp,
   });
+
   console.log(`${LOG_PREFIX} Using listen IP: 0.0.0.0 with announced IP: ${publicIp}`);
   if (!publicIp) {
     console.warn(`${LOG_PREFIX} WARNING: No ANNOUNCED_IP environment variable set. Remote clients may have connectivity issues.`);
@@ -289,7 +302,6 @@ async function getOrCreateRoom(roomName) {
       };
       rooms.set(roomName, room);
       console.log(`${LOG_PREFIX} Room ${roomName} created successfully`);
-      // Instead of just emitting later, call the callback immediately.
       resolve(room);
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating room ${roomName}:`, error);
@@ -523,9 +535,10 @@ io.on("connection", (socket) => {
         userName,
         userInitials: userName.substring(0, 2),
       });
-      // Send router RTP capabilities via the callback.
+      // Send router RTP capabilities using toJSON() if available.
       const rtpCaps =
-        room.router.rtpCapabilities && typeof room.router.rtpCapabilities.toJSON === "function"
+        room.router.rtpCapabilities &&
+        typeof room.router.rtpCapabilities.toJSON === "function"
           ? room.router.rtpCapabilities.toJSON()
           : room.router.rtpCapabilities;
       console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
