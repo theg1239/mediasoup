@@ -448,43 +448,105 @@ io.on("connection", (socket) => {
         userName,
         userInitials: userName.substring(0, 2)
       });
-
-      socket.once("deviceReady", async () => {
-        console.log(`${LOG_PREFIX} Device ready for user ${userId}`);
-        const peer = room.peers.get(socket.id);
-        if (peer) {
-          peer.deviceReady = true;
-          
-          for (const producerInfo of existingProducers) {
-            try {
-              const transport = await createWebRtcTransport(room.router);
-              peer.transports[transport.transport.id] = transport.transport;
-              
-              socket.emit("createWebRtcTransport", { consumer: true }, transport.params);
-              
-              const consumer = await transport.transport.consume({
-                producerId: producerInfo.producerId,
-                rtpCapabilities: rtpCaps
-              });
-              
-              peer.consumers.set(consumer.id, consumer);
-              
-              socket.emit("consume", {
-                id: consumer.id,
-                producerId: producerInfo.producerId,
-                kind: consumer.kind,
-                rtpParameters: consumer.rtpParameters,
-                serverConsumerId: consumer.id
-              });
-            } catch (error) {
-              console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
-            }
-          }
-        }
-      });
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
       socket.emit("error", { message: "Failed to join room", error: error.message });
+    }
+  });
+
+  socket.on("createWebRtcTransport", async (data, callback) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+      const peer = room.peers.get(socket.id);
+      if (!peer) throw new Error("Peer not found");
+
+      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.data.userId}`);
+      const transport = await createWebRtcTransport(room.router);
+      
+      peer.transports[transport.transport.id] = transport.transport;
+      console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.transport.id}`);
+      
+      callback(transport.params);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+      callback({ error: error.message });
+    }
+  });
+
+  // Add deviceReady handler
+  socket.on("deviceReady", async () => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+      const peer = room.peers.get(socket.id);
+      if (!peer) throw new Error("Peer not found");
+
+      console.log(`${LOG_PREFIX} Device ready for user ${socket.data.userId}`);
+      peer.deviceReady = true;
+
+      // Collect existing producers
+      const existingProducers = [];
+      for (const [id, otherPeer] of room.peers.entries()) {
+        if (otherPeer.socket.id !== socket.id) {
+          for (const [producerId, producer] of otherPeer.producers.entries()) {
+            existingProducers.push({
+              producerId,
+              producerUserId: otherPeer.userId,
+              kind: producer.kind,
+              rtpParameters: producer.rtpParameters
+            });
+          }
+        }
+      }
+
+      // Create consumer transports for existing producers
+      for (const producerInfo of existingProducers) {
+        try {
+          const transport = await createWebRtcTransport(room.router);
+          peer.transports[transport.transport.id] = transport.transport;
+          
+          socket.emit("createWebRtcTransport", { consumer: true }, transport.params);
+          
+          const consumer = await transport.transport.consume({
+            producerId: producerInfo.producerId,
+            rtpCapabilities: room.router.rtpCapabilities
+          });
+          
+          peer.consumers.set(consumer.id, consumer);
+          
+          socket.emit("consume", {
+            id: consumer.id,
+            producerId: producerInfo.producerId,
+            kind: consumer.kind,
+            rtpParameters: consumer.rtpParameters,
+            serverConsumerId: consumer.id
+          });
+        } catch (error) {
+          console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
+        }
+      }
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error handling deviceReady:`, error);
+    }
+  });
+
+  socket.on("chatMessage", (data) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+
+      const { roomId, userId, userName, message } = data;
+      console.log(`${LOG_PREFIX} Chat message from ${userName}: ${message}`);
+
+      io.to(roomId).emit("chatMessage", {
+        userId,
+        userName,
+        message,
+        timestamp: Date.now()
+      });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error handling chat message:`, error);
     }
   });
 
@@ -519,6 +581,7 @@ io.on("connection", (socket) => {
     }
   });
 
+  // transport-produce: create a producer
   socket.on("transport-produce", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
