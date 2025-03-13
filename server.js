@@ -452,7 +452,7 @@ io.on("connection", (socket) => {
         : room.router.rtpCapabilities;
       
       console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
-      callback({ rtpCapabilities: rtpCaps, existingProducers });
+      safeCallback(callback, { rtpCapabilities: rtpCaps, existingProducers });
       
       // Notify others about the new user
       socket.to(roomName).emit("userJoined", {
@@ -604,9 +604,9 @@ io.on("connection", (socket) => {
         typeof room.router.rtpCapabilities.toJSON === "function")
         ? room.router.rtpCapabilities.toJSON()
         : room.router.rtpCapabilities;
-      callback({ rtpCapabilities: rtpCaps });
+      safeCallback(callback, { rtpCapabilities: rtpCaps });
     } else {
-      callback({ rtpCapabilities: null });
+      safeCallback(callback, { rtpCapabilities: null });
     }
   });
 
@@ -622,9 +622,9 @@ io.on("connection", (socket) => {
       if (!transport) throw new Error("Transport not found");
       
       await transport.connect({ dtlsParameters: data.dtlsParameters });
-      callback();
+      safeCallback(callback, {});
     } catch (error) {
-      callback({ error: error.message });
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -634,26 +634,20 @@ io.on("connection", (socket) => {
       const room = rooms.get(socket.data.roomName);
       if (!room) {
         console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Room not found" });
-        }
+        safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
         console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Peer not found" });
-        }
+        safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       const transport = peer.transports[data.transportId];
       if (!transport) {
         console.error(`${LOG_PREFIX} Transport not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Transport not found" });
-        }
+        safeCallback(callback, { error: "Transport not found" });
         return;
       }
       
@@ -675,14 +669,10 @@ io.on("connection", (socket) => {
         kind: producer.kind
       });
       
-      if (typeof callback === 'function') {
-        callback({ id: producer.id });
-      }
+      safeCallback(callback, { id: producer.id });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating producer:`, error);
-      if (typeof callback === 'function') {
-        callback({ error: error.message });
-      }
+      safeCallback(callback, { error: error.message });
     }
   });
 
