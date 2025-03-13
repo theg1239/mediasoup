@@ -459,13 +459,17 @@ io.on("connection", (socket) => {
       const room = rooms.get(socket.data.roomName);
       if (!room) {
         console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
-        callback({ error: "Room not found" });
+        if (typeof callback === 'function') {
+          callback({ error: "Room not found" });
+        }
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
         console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
-        callback({ error: "Peer not found" });
+        if (typeof callback === 'function') {
+          callback({ error: "Peer not found" });
+        }
         return;
       }
 
@@ -475,18 +479,22 @@ io.on("connection", (socket) => {
       peer.transports[transport.transport.id] = transport.transport;
       console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.transport.id}`);
       
-      callback({
-        params: {
-          id: transport.transport.id,
-          iceParameters: transport.transport.iceParameters,
-          iceCandidates: transport.transport.iceCandidates,
-          dtlsParameters: transport.transport.dtlsParameters,
-          sctpParameters: transport.transport.sctpParameters
-        }
-      });
+      if (typeof callback === 'function') {
+        callback({
+          params: {
+            id: transport.transport.id,
+            iceParameters: transport.transport.iceParameters,
+            iceCandidates: transport.transport.iceCandidates,
+            dtlsParameters: transport.transport.dtlsParameters,
+            sctpParameters: transport.transport.sctpParameters
+          }
+        });
+      }
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
-      callback({ error: error.message });
+      if (typeof callback === 'function') {
+        callback({ error: error.message });
+      }
     }
   });
 
