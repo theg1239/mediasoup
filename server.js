@@ -415,13 +415,16 @@ io.on("connection", (socket) => {
       }
       socket.emit("roomUsers", participants);
 
+      // Collect existing producers from all peers
       const existingProducers = [];
       for (const [id, peer] of room.peers.entries()) {
         if (peer.socket.id !== socket.id) {
-          for (const [producerId] of peer.producers.entries()) {
+          for (const [producerId, producer] of peer.producers.entries()) {
             existingProducers.push({
               producerId,
-              producerUserId: peer.userId
+              producerUserId: peer.userId,
+              kind: producer.kind,
+              rtpParameters: producer.rtpParameters
             });
           }
         }
@@ -434,11 +437,37 @@ io.on("connection", (socket) => {
       console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
       callback({ rtpCapabilities: rtpCaps, existingProducers });
       
+      // Notify others about the new user
       socket.to(roomName).emit("userJoined", {
         userId,
         userName,
         userInitials: userName.substring(0, 2)
       });
+
+      for (const producerInfo of existingProducers) {
+        try {
+          const transport = await createWebRtcTransport(room.router);
+          room.peers.get(socket.id).transports[transport.transport.id] = transport.transport;
+          
+          socket.emit("createWebRtcTransport", { consumer: true }, transport.params);
+          
+          const consumer = await transport.transport.consume({
+            producerId: producerInfo.producerId,
+            rtpCapabilities: rtpCaps
+          });
+          
+          room.peers.get(socket.id).consumers.set(consumer.id, consumer);
+          
+          socket.emit("consume", {
+            id: consumer.id,
+            producerId: producerInfo.producerId,
+            kind: consumer.kind,
+            rtpParameters: consumer.rtpParameters
+          });
+        } catch (error) {
+          console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
+        }
+      }
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
       socket.emit("error", { message: "Failed to join room", error: error.message });
@@ -606,7 +635,7 @@ async function closeAndCleanupRoom(roomName) {
 // ------------------------------
 // Start Server
 // ------------------------------
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`${LOG_PREFIX} Server is running on port ${PORT}`);
   console.log(`${LOG_PREFIX} Environment: ${process.env.NODE_ENV || "development"}`);
