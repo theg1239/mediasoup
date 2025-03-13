@@ -389,7 +389,9 @@ io.on("connection", (socket) => {
       socket.data.userId = userId;
       socket.data.userName = userName;
       socket.data.userEmail = userEmail;
+      
       const room = await getOrCreateRoom(roomName);
+      
       room.peers.set(socket.id, {
         socket,
         transports: {},
@@ -397,12 +399,14 @@ io.on("connection", (socket) => {
         consumers: new Map(),
         userId,
         userName,
-        userEmail
+        userEmail,
+        deviceReady: false
       });
+      
       socket.join(roomName);
       console.log(`${LOG_PREFIX} User ${userId} (${userName}) joined room ${roomName}`);
 
-      // Build participants list (excluding current user).
+      // Build participants list (excluding current user)
       const participants = [];
       for (const [id, peer] of room.peers.entries()) {
         if (peer.userId !== userId) {
@@ -434,6 +438,7 @@ io.on("connection", (socket) => {
         typeof room.router.rtpCapabilities.toJSON === "function")
         ? room.router.rtpCapabilities.toJSON()
         : room.router.rtpCapabilities;
+      
       console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
       callback({ rtpCapabilities: rtpCaps, existingProducers });
       
@@ -445,28 +450,35 @@ io.on("connection", (socket) => {
       });
 
       socket.once("deviceReady", async () => {
-        for (const producerInfo of existingProducers) {
-          try {
-            const transport = await createWebRtcTransport(room.router);
-            room.peers.get(socket.id).transports[transport.transport.id] = transport.transport;
-            
-            socket.emit("createWebRtcTransport", { consumer: true }, transport.params);
-            
-            const consumer = await transport.transport.consume({
-              producerId: producerInfo.producerId,
-              rtpCapabilities: rtpCaps
-            });
-            
-            room.peers.get(socket.id).consumers.set(consumer.id, consumer);
-            
-            socket.emit("consume", {
-              id: consumer.id,
-              producerId: producerInfo.producerId,
-              kind: consumer.kind,
-              rtpParameters: consumer.rtpParameters
-            });
-          } catch (error) {
-            console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
+        console.log(`${LOG_PREFIX} Device ready for user ${userId}`);
+        const peer = room.peers.get(socket.id);
+        if (peer) {
+          peer.deviceReady = true;
+          
+          for (const producerInfo of existingProducers) {
+            try {
+              const transport = await createWebRtcTransport(room.router);
+              peer.transports[transport.transport.id] = transport.transport;
+              
+              socket.emit("createWebRtcTransport", { consumer: true }, transport.params);
+              
+              const consumer = await transport.transport.consume({
+                producerId: producerInfo.producerId,
+                rtpCapabilities: rtpCaps
+              });
+              
+              peer.consumers.set(consumer.id, consumer);
+              
+              socket.emit("consume", {
+                id: consumer.id,
+                producerId: producerInfo.producerId,
+                kind: consumer.kind,
+                rtpParameters: consumer.rtpParameters,
+                serverConsumerId: consumer.id
+              });
+            } catch (error) {
+              console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
+            }
           }
         }
       });
@@ -489,55 +501,60 @@ io.on("connection", (socket) => {
     }
   });
 
-  // transport-connect: acknowledge connection.
-  socket.on("transport-connect", (data, callback) => {
-    callback();
-  });
-
-  // transport-produce: create a producer.
-  socket.on("transport-produce", async (data, callback) => {
+  // transport-connect: acknowledge connection
+  socket.on("transport-connect", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
       if (!room) throw new Error("Room not found");
       const peer = room.peers.get(socket.id);
       if (!peer) throw new Error("Peer not found");
+      
       const transport = peer.transports[data.transportId];
       if (!transport) throw new Error("Transport not found");
-      const producer = await transport.produce({
-        kind: data.kind,
-        rtpParameters: data.rtpParameters,
-        appData: data.appData
-      });
-      peer.producers.set(producer.id, producer);
-      callback({ id: producer.id });
-      socket.to(socket.data.roomName).emit("new-producer", {
-        producerId: producer.id,
-        producerUserId: socket.data.userId
-      });
+      
+      await transport.connect({ dtlsParameters: data.dtlsParameters });
+      callback();
     } catch (error) {
       callback({ error: error.message });
     }
   });
 
-  // transport-recv-connect: acknowledge consumer transport connection.
-  socket.on("transport-recv-connect", (data, callback) => {
-    callback();
+  // transport-recv-connect: acknowledge consumer transport connection
+  socket.on("transport-recv-connect", async (data, callback) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+      const peer = room.peers.get(socket.id);
+      if (!peer) throw new Error("Peer not found");
+      
+      const transport = peer.transports[data.serverConsumerTransportId];
+      if (!transport) throw new Error("Consumer transport not found");
+      
+      await transport.connect({ dtlsParameters: data.dtlsParameters });
+      callback();
+    } catch (error) {
+      callback({ error: error.message });
+    }
   });
 
-  // consume: create a consumer for a remote producer.
+  // consume: create a consumer for a remote producer
   socket.on("consume", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
       if (!room) throw new Error("Room not found");
       const peer = room.peers.get(socket.id);
       if (!peer) throw new Error("Peer not found");
+      
       const consumerTransport = peer.transports[data.serverConsumerTransportId];
       if (!consumerTransport) throw new Error("Consumer transport not found");
+      
       const consumer = await consumerTransport.consume({
         producerId: data.remoteProducerId,
         rtpCapabilities: data.rtpCapabilities
       });
+      
       peer.consumers.set(consumer.id, consumer);
+      
       callback({
         id: consumer.id,
         producerId: data.remoteProducerId,
@@ -550,24 +567,21 @@ io.on("connection", (socket) => {
     }
   });
 
-  // consumer-resume: acknowledge resume.
-  socket.on("consumer-resume", (data, callback) => {
-    callback();
-  });
-
-  // restartIce: perform ICE restart.
-  socket.on("restartIce", async (data) => {
+  // consumer-resume: acknowledge resume
+  socket.on("consumer-resume", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
       if (!room) throw new Error("Room not found");
       const peer = room.peers.get(socket.id);
       if (!peer) throw new Error("Peer not found");
-      const transport = peer.transports[data.transportId];
-      if (!transport) throw new Error("Transport not found");
-      const iceParameters = await transport.restartIce();
-      socket.emit("iceRestarted", { transportId: data.transportId, iceParameters });
+      
+      const consumer = peer.consumers.get(data.serverConsumerId);
+      if (!consumer) throw new Error("Consumer not found");
+      
+      await consumer.resume();
+      callback();
     } catch (error) {
-      socket.emit("error", { message: "Failed to restart ICE", error: error.message });
+      callback({ error: error.message });
     }
   });
 
