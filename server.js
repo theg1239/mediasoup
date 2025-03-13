@@ -462,7 +462,7 @@ io.on("connection", (socket) => {
       });
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
-      socket.emit("error", { message: "Failed to join room", error: error.message });
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -471,17 +471,13 @@ io.on("connection", (socket) => {
       const room = rooms.get(socket.data.roomName);
       if (!room) {
         console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Room not found" });
-        }
+        safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
         console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
-        if (typeof callback === 'function') {
-          callback({ error: "Peer not found" });
-        }
+        safeCallback(callback, { error: "Peer not found" });
         return;
       }
 
@@ -491,22 +487,18 @@ io.on("connection", (socket) => {
       peer.transports[transport.transport.id] = transport.transport;
       console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.transport.id}`);
       
-      if (typeof callback === 'function') {
-        callback({
-          params: {
-            id: transport.transport.id,
-            iceParameters: transport.transport.iceParameters,
-            iceCandidates: transport.transport.iceCandidates,
-            dtlsParameters: transport.transport.dtlsParameters,
-            sctpParameters: transport.transport.sctpParameters
-          }
-        });
-      }
+      safeCallback(callback, {
+        params: {
+          id: transport.transport.id,
+          iceParameters: transport.transport.iceParameters,
+          iceCandidates: transport.transport.iceCandidates,
+          dtlsParameters: transport.transport.dtlsParameters,
+          sctpParameters: transport.transport.sctpParameters
+        }
+      });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
-      if (typeof callback === 'function') {
-        callback({ error: error.message });
-      }
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -604,9 +596,9 @@ io.on("connection", (socket) => {
         typeof room.router.rtpCapabilities.toJSON === "function")
         ? room.router.rtpCapabilities.toJSON()
         : room.router.rtpCapabilities;
-      safeCallback(callback, { rtpCapabilities: rtpCaps });
+      callback({ rtpCapabilities: rtpCaps });
     } else {
-      safeCallback(callback, { rtpCapabilities: null });
+      callback({ rtpCapabilities: null });
     }
   });
 
@@ -622,7 +614,7 @@ io.on("connection", (socket) => {
       if (!transport) throw new Error("Transport not found");
       
       await transport.connect({ dtlsParameters: data.dtlsParameters });
-      safeCallback(callback, {});
+      safeCallback(callback);
     } catch (error) {
       safeCallback(callback, { error: error.message });
     }
@@ -681,37 +673,27 @@ io.on("connection", (socket) => {
     try {
       const room = rooms.get(socket.data.roomName);
       if (!room) {
-        if (typeof callback === 'function') {
-          callback({ error: "Room not found" });
-        }
+        safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        if (typeof callback === 'function') {
-          callback({ error: "Peer not found" });
-        }
+        safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       const transport = peer.transports[data.serverConsumerTransportId];
       if (!transport) {
-        if (typeof callback === 'function') {
-          callback({ error: "Consumer transport not found" });
-        }
+        safeCallback(callback, { error: "Consumer transport not found" });
         return;
       }
       
       console.log(`${LOG_PREFIX} Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.data.userId}`);
       await transport.connect({ dtlsParameters: data.dtlsParameters });
-      if (typeof callback === 'function') {
-        callback();
-      }
+      safeCallback(callback);
     } catch (error) {
       console.error(`${LOG_PREFIX} Error connecting consumer transport:`, error);
-      if (typeof callback === 'function') {
-        callback({ error: error.message });
-      }
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -720,24 +702,18 @@ io.on("connection", (socket) => {
     try {
       const room = rooms.get(socket.data.roomName);
       if (!room) {
-        if (typeof callback === 'function') {
-          callback({ error: "Room not found" });
-        }
+        safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        if (typeof callback === 'function') {
-          callback({ error: "Peer not found" });
-        }
+        safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       const consumerTransport = peer.transports[data.serverConsumerTransportId];
       if (!consumerTransport) {
-        if (typeof callback === 'function') {
-          callback({ error: "Consumer transport not found" });
-        }
+        safeCallback(callback, { error: "Consumer transport not found" });
         return;
       }
       
@@ -751,20 +727,16 @@ io.on("connection", (socket) => {
       peer.consumers.set(consumer.id, consumer);
       console.log(`${LOG_PREFIX} Consumer created: ${consumer.id} for user ${socket.data.userId}`);
       
-      if (typeof callback === 'function') {
-        callback({
-          id: consumer.id,
-          producerId: data.remoteProducerId,
-          kind: consumer.kind,
-          rtpParameters: consumer.rtpParameters,
-          serverConsumerId: consumer.id
-        });
-      }
+      safeCallback(callback, {
+        id: consumer.id,
+        producerId: data.remoteProducerId,
+        kind: consumer.kind,
+        rtpParameters: consumer.rtpParameters,
+        serverConsumerId: consumer.id
+      });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating consumer:`, error);
-      if (typeof callback === 'function') {
-        callback({ error: error.message });
-      }
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -773,35 +745,25 @@ io.on("connection", (socket) => {
     try {
       const room = rooms.get(socket.data.roomName);
       if (!room) {
-        if (typeof callback === 'function') {
-          callback({ error: "Room not found" });
-        }
+        safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        if (typeof callback === 'function') {
-          callback({ error: "Peer not found" });
-        }
+        safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       const consumer = peer.consumers.get(data.serverConsumerId);
       if (!consumer) {
-        if (typeof callback === 'function') {
-          callback({ error: "Consumer not found" });
-        }
+        safeCallback(callback, { error: "Consumer not found" });
         return;
       }
       
       await consumer.resume();
-      if (typeof callback === 'function') {
-        callback();
-      }
+      safeCallback(callback);
     } catch (error) {
-      if (typeof callback === 'function') {
-        callback({ error: error.message });
-      }
+      safeCallback(callback, { error: error.message });
     }
   });
 
