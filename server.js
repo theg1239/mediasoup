@@ -519,6 +519,41 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("transport-produce", async (data, callback) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+      const peer = room.peers.get(socket.id);
+      if (!peer) throw new Error("Peer not found");
+      
+      const transport = peer.transports[data.transportId];
+      if (!transport) throw new Error("Transport not found");
+      
+      console.log(`${LOG_PREFIX} Creating producer for user ${socket.data.userId} with kind ${data.kind}`);
+      
+      const producer = await transport.produce({
+        kind: data.kind,
+        rtpParameters: data.rtpParameters,
+        appData: data.appData
+      });
+      
+      peer.producers.set(producer.id, producer);
+      console.log(`${LOG_PREFIX} Producer created: ${producer.id} for user ${socket.data.userId}`);
+      
+      // Notify other users about the new producer
+      socket.to(socket.data.roomName).emit("new-producer", {
+        producerId: producer.id,
+        producerUserId: socket.data.userId,
+        kind: producer.kind
+      });
+      
+      callback({ id: producer.id });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error creating producer:`, error);
+      callback({ error: error.message });
+    }
+  });
+
   // transport-recv-connect: acknowledge consumer transport connection
   socket.on("transport-recv-connect", async (data, callback) => {
     try {
@@ -530,9 +565,11 @@ io.on("connection", (socket) => {
       const transport = peer.transports[data.serverConsumerTransportId];
       if (!transport) throw new Error("Consumer transport not found");
       
+      console.log(`${LOG_PREFIX} Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.data.userId}`);
       await transport.connect({ dtlsParameters: data.dtlsParameters });
       callback();
     } catch (error) {
+      console.error(`${LOG_PREFIX} Error connecting consumer transport:`, error);
       callback({ error: error.message });
     }
   });
@@ -548,12 +585,15 @@ io.on("connection", (socket) => {
       const consumerTransport = peer.transports[data.serverConsumerTransportId];
       if (!consumerTransport) throw new Error("Consumer transport not found");
       
+      console.log(`${LOG_PREFIX} Creating consumer for producer ${data.remoteProducerId} for user ${socket.data.userId}`);
+      
       const consumer = await consumerTransport.consume({
         producerId: data.remoteProducerId,
         rtpCapabilities: data.rtpCapabilities
       });
       
       peer.consumers.set(consumer.id, consumer);
+      console.log(`${LOG_PREFIX} Consumer created: ${consumer.id} for user ${socket.data.userId}`);
       
       callback({
         id: consumer.id,
@@ -563,6 +603,7 @@ io.on("connection", (socket) => {
         serverConsumerId: consumer.id
       });
     } catch (error) {
+      console.error(`${LOG_PREFIX} Error creating consumer:`, error);
       callback({ error: error.message });
     }
   });
