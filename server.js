@@ -24,8 +24,8 @@ const LOG_PREFIX = "[MediasoupServer]";
 // Update the file paths to match where your certs are located.
 // For example, if you generated them using the instructions and stored them in ./certs folder:
 const sslOptions = {
-  key: fs.readFileSync(path.join(__dirname, "certs", "key.pem")),
-  cert: fs.readFileSync(path.join(__dirname, "certs", "cert.pem"))
+  key: fs.readFileSync(path.join(__dirname, "mediasoup-certs", "key.pem")),
+  cert: fs.readFileSync(path.join(__dirname, "mediasoup-certs", "cert.pem"))
 };
 
 // ------------------------------
