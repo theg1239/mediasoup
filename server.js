@@ -752,9 +752,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// ------------------------------
-// Helper: Handle Peer Leaving
-// ------------------------------
+
 function handleUserLeaving(socket) {
   const roomName = socket.data.roomName;
   if (!roomName) return;
@@ -809,9 +807,6 @@ async function closeAndCleanupRoom(roomName) {
   console.log(`${LOG_PREFIX} Room ${roomName} removed from active rooms`);
 }
 
-// ------------------------------
-// Start Server
-// ------------------------------
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`${LOG_PREFIX} Server is running on port ${PORT}`);
