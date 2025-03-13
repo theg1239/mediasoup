@@ -620,12 +620,30 @@ io.on("connection", (socket) => {
   socket.on("transport-produce", async (data, callback) => {
     try {
       const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
+      if (!room) {
+        console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
+        if (typeof callback === 'function') {
+          callback({ error: "Room not found" });
+        }
+        return;
+      }
       const peer = room.peers.get(socket.id);
-      if (!peer) throw new Error("Peer not found");
+      if (!peer) {
+        console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
+        if (typeof callback === 'function') {
+          callback({ error: "Peer not found" });
+        }
+        return;
+      }
       
       const transport = peer.transports[data.transportId];
-      if (!transport) throw new Error("Transport not found");
+      if (!transport) {
+        console.error(`${LOG_PREFIX} Transport not found for user ${socket.data.userId}`);
+        if (typeof callback === 'function') {
+          callback({ error: "Transport not found" });
+        }
+        return;
+      }
       
       console.log(`${LOG_PREFIX} Creating producer for user ${socket.data.userId} with kind ${data.kind}`);
       
@@ -645,10 +663,14 @@ io.on("connection", (socket) => {
         kind: producer.kind
       });
       
-      callback({ id: producer.id });
+      if (typeof callback === 'function') {
+        callback({ id: producer.id });
+      }
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating producer:`, error);
-      callback({ error: error.message });
+      if (typeof callback === 'function') {
+        callback({ error: error.message });
+      }
     }
   });
 
