@@ -1,11 +1,8 @@
 "use strict";
 
-// ------------------------------
-// Required Modules & Environment Setup
-// ------------------------------
-const express = require("express");
-const https = require("https");
 const fs = require("fs");
+const https = require("https");
+const express = require("express");
 const cors = require("cors");
 const socketIo = require("socket.io");
 const mediasoup = require("mediasoup");
@@ -14,23 +11,13 @@ const path = require("path");
 require("dotenv").config();
 
 const app = express();
-
-// Global log prefix for easier filtering
 const LOG_PREFIX = "[MediasoupServer]";
 
-// ------------------------------
-// Load SSL Certificates
-// ------------------------------
-// Update the file paths to match where your certs are located.
-// For example, if you generated them using the instructions and stored them in ./certs folder:
 const sslOptions = {
   key: fs.readFileSync(path.join(__dirname, "mediasoup-certs", "key.pem")),
   cert: fs.readFileSync(path.join(__dirname, "mediasoup-certs", "cert.pem"))
 };
 
-// ------------------------------
-// CORS Options (adapt as needed)
-// ------------------------------
 const corsOptions = {
   origin: (origin, callback) => {
     console.log(`${LOG_PREFIX} CORS check for origin: ${origin}`);
@@ -57,9 +44,6 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// ------------------------------
-// Health and Static File Endpoints
-// ------------------------------
 app.get("/health", (req, res) => {
   console.log(`${LOG_PREFIX} Health check requested`);
   res.status(200).json({ status: "ok", uptime: process.uptime() });
@@ -80,48 +64,35 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ------------------------------
-// Create HTTPS Server and Socket.IO Instance
-// ------------------------------
 const server = https.createServer(sslOptions, app);
 const io = socketIo(server, {
   cors: corsOptions,
-  pingTimeout: 60000, // Longer ping timeout
-  pingInterval: 25000, // More frequent pings
+  pingTimeout: 60000,
+  pingInterval: 25000,
   transports: ["websocket", "polling"],
 });
 
 console.log(`${LOG_PREFIX} HTTPS and Socket.IO server initialized`);
 
-// ------------------------------
-// Helper: Determine which IPs mediasoup should listen on
-// ------------------------------
+
 function getListenIps() {
   console.log(`${LOG_PREFIX} Determining listen IPs for mediasoup...`);
   const interfaces = os.networkInterfaces();
   console.log(`${LOG_PREFIX} Available network interfaces:`, interfaces);
   const listenIps = [];
   const publicIp = process.env.ANNOUNCED_IP || null;
-
-  listenIps.push({
-    ip: "0.0.0.0",
-    announcedIp: publicIp,
-  });
-
+  listenIps.push({ ip: "0.0.0.0", announcedIp: publicIp });
   console.log(`${LOG_PREFIX} Using listen IP: 0.0.0.0 with announced IP: ${publicIp}`);
   if (!publicIp) {
-    console.warn(`${LOG_PREFIX} WARNING: No ANNOUNCED_IP environment variable set. Remote clients may have connectivity issues.`);
+    console.warn(`${LOG_PREFIX} WARNING: No ANNOUNCED_IP set. Remote clients may have connectivity issues.`);
   }
   return listenIps;
 }
 
-// ------------------------------
-// Mediasoup Options
-// ------------------------------
 const mediasoupOptions = {
   worker: {
-    rtcMinPort: process.env.RTC_MIN_PORT || 40000,
-    rtcMaxPort: process.env.RTC_MAX_PORT || 49999,
+    rtcMinPort: Number(process.env.RTC_MIN_PORT) || 40000,
+    rtcMaxPort: Number(process.env.RTC_MAX_PORT) || 49999,
     logLevel: process.env.LOG_LEVEL || "warn",
     logTags: ["info", "ice", "dtls", "rtp", "srtp", "rtcp", "verbose"],
   },
@@ -183,36 +154,31 @@ const mediasoupOptions = {
 
 console.log(`${LOG_PREFIX} Mediasoup options configured:`, mediasoupOptions);
 
-// ------------------------------
-// Worker and Room Management
-// ------------------------------
 const roomsInCreation = new Map();
 let workers = [];
 const workerLoadCount = new Map();
 
 async function createWorkers() {
   console.log(`${LOG_PREFIX} Starting creation of mediasoup workers...`);
-  const numWorkers = process.env.NUM_WORKERS ? parseInt(process.env.NUM_WORKERS, 10) : 1;
+  const numWorkers = Number(process.env.NUM_WORKERS) || 1;
   const coreCount = os.cpus().length;
   const count = Math.min(numWorkers, coreCount);
-  console.log(`${LOG_PREFIX} Attempting to create ${count} workers (CPU cores: ${coreCount}, Requested: ${numWorkers})`);
+  console.log(`${LOG_PREFIX} Creating ${count} workers (CPU cores: ${coreCount}, Requested: ${numWorkers})`);
   const workerPromises = [];
   for (let i = 0; i < count; i++) {
     console.log(`${LOG_PREFIX} Creating worker ${i}`);
     workerPromises.push(
-      mediasoup
-        .createWorker(mediasoupOptions.worker)
+      mediasoup.createWorker(mediasoupOptions.worker)
         .then((worker) => {
           console.log(`${LOG_PREFIX} Mediasoup Worker ${i} created with PID: ${worker.pid}`);
           worker.on("died", (error) => {
-            console.error(`${LOG_PREFIX} Mediasoup Worker ${i} died with error: ${error.message}`);
+            console.error(`${LOG_PREFIX} Worker ${i} died: ${error.message}`);
             setTimeout(async () => {
               try {
-                console.log(`${LOG_PREFIX} Attempting to recreate dead worker ${i}...`);
                 const newWorker = await mediasoup.createWorker(mediasoupOptions.worker);
                 workers[i] = newWorker;
                 workerLoadCount.set(newWorker, 0);
-                console.log(`${LOG_PREFIX} Worker ${i} recreated successfully with new PID: ${newWorker.pid}`);
+                console.log(`${LOG_PREFIX} Worker ${i} recreated with new PID: ${newWorker.pid}`);
               } catch (err) {
                 console.error(`${LOG_PREFIX} Failed to recreate worker ${i}:`, err);
               }
@@ -223,13 +189,13 @@ async function createWorkers() {
           return worker;
         })
         .catch((error) => {
-          console.error(`${LOG_PREFIX} Failed to create mediasoup worker ${i}:`, error);
+          console.error(`${LOG_PREFIX} Failed to create worker ${i}:`, error);
           return null;
         })
     );
   }
   const results = await Promise.all(workerPromises);
-  workers = results.filter((worker) => worker !== null);
+  workers = results.filter((w) => w !== null);
   if (workers.length === 0) {
     throw new Error(`${LOG_PREFIX} Failed to create any mediasoup workers`);
   }
@@ -246,52 +212,42 @@ async function createWorkers() {
 })();
 
 function getLeastLoadedWorker() {
-  if (workers.length === 0) {
-    throw new Error(`${LOG_PREFIX} No mediasoup workers available`);
-  }
-  const sortedWorkers = [...workerLoadCount.entries()].sort((a, b) => a[1] - b[1]);
-  const [worker, load] = sortedWorkers[0];
+  if (workers.length === 0) throw new Error(`${LOG_PREFIX} No mediasoup workers available`);
+  const sorted = [...workerLoadCount.entries()].sort((a, b) => a[1] - b[1]);
+  const [worker, load] = sorted[0];
   workerLoadCount.set(worker, load + 1);
-  console.log(`${LOG_PREFIX} Selected worker with PID ${worker.pid} (current load: ${load}, new load: ${load + 1})`);
+  console.log(`${LOG_PREFIX} Selected worker PID ${worker.pid} (load: ${load} -> ${load + 1})`);
   return worker;
 }
 
 function releaseWorker(worker) {
-  const currentLoad = workerLoadCount.get(worker) || 0;
-  if (currentLoad > 0) {
-    workerLoadCount.set(worker, currentLoad - 1);
-    console.log(`${LOG_PREFIX} Released worker with PID ${worker.pid} (new load: ${currentLoad - 1})`);
+  const current = workerLoadCount.get(worker) || 0;
+  if (current > 0) {
+    workerLoadCount.set(worker, current - 1);
+    console.log(`${LOG_PREFIX} Released worker PID ${worker.pid} (new load: ${current - 1})`);
   } else {
-    console.warn(`${LOG_PREFIX} Attempted to release worker with PID ${worker.pid} but its load was already 0`);
+    console.warn(`${LOG_PREFIX} Worker PID ${worker.pid} already has load 0`);
   }
 }
 
 const rooms = new Map();
 
 async function getOrCreateRoom(roomName) {
-  console.log(`${LOG_PREFIX} getOrCreateRoom called for roomName: ${roomName}`);
+  console.log(`${LOG_PREFIX} getOrCreateRoom called for room: ${roomName}`);
   let room = rooms.get(roomName);
   if (room) {
-    console.log(`${LOG_PREFIX} Room ${roomName} already exists, returning existing room`);
+    console.log(`${LOG_PREFIX} Room ${roomName} exists`);
     return room;
   }
   if (roomsInCreation.has(roomName)) {
-    console.log(`${LOG_PREFIX} Room ${roomName} is currently being created, waiting...`);
-    try {
-      await roomsInCreation.get(roomName);
-      return rooms.get(roomName);
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Error waiting for room ${roomName} creation:`, error);
-      throw error;
-    }
+    console.log(`${LOG_PREFIX} Room ${roomName} is being created, waiting...`);
+    await roomsInCreation.get(roomName);
+    return rooms.get(roomName);
   }
-  console.log(`${LOG_PREFIX} Creating new room: ${roomName}`);
-  const creationPromise = new Promise(async (resolve, reject) => {
+  const promise = new Promise(async (resolve, reject) => {
     try {
       const worker = getLeastLoadedWorker();
-      const router = await worker.createRouter({
-        mediaCodecs: mediasoupOptions.router.mediaCodecs,
-      });
+      const router = await worker.createRouter({ mediaCodecs: mediasoupOptions.router.mediaCodecs });
       console.log(`${LOG_PREFIX} Router created for room ${roomName} on worker PID ${worker.pid}`);
       room = {
         id: roomName,
@@ -301,211 +257,106 @@ async function getOrCreateRoom(roomName) {
         creationTime: Date.now(),
       };
       rooms.set(roomName, room);
-      console.log(`${LOG_PREFIX} Room ${roomName} created successfully`);
       resolve(room);
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating room ${roomName}:`, error);
       reject(error);
     } finally {
       roomsInCreation.delete(roomName);
-      console.log(`${LOG_PREFIX} Cleanup for room creation promise of room ${roomName}`);
+      console.log(`${LOG_PREFIX} Cleanup for room creation of ${roomName}`);
     }
   });
-  roomsInCreation.set(roomName, creationPromise);
-  return creationPromise;
+  roomsInCreation.set(roomName, promise);
+  return promise;
 }
 
 async function createWebRtcTransport(router) {
-  console.log(`${LOG_PREFIX} createWebRtcTransport called on router with id: ${router.id}`);
+  console.log(`${LOG_PREFIX} Creating WebRTC transport on router ${router.id}`);
   const { listenIps, initialAvailableOutgoingBitrate, maxIncomingBitrate } = mediasoupOptions.webRtcTransport;
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      const errorMsg = `${LOG_PREFIX} Timeout creating WebRTC transport`;
-      console.error(errorMsg);
-      reject(new Error(errorMsg));
+      const errMsg = `${LOG_PREFIX} Timeout creating WebRTC transport`;
+      console.error(errMsg);
+      reject(new Error(errMsg));
     }, 10000);
-    try {
-      console.log(`${LOG_PREFIX} Creating WebRTC transport with options:`, {
-        listenIps,
-        initialAvailableOutgoingBitrate,
-        maxIncomingBitrate,
-      });
-      const transportOptions = {
-        listenIps,
-        enableUdp: true,
-        enableTcp: true,
-        preferUdp: true,
-        initialAvailableOutgoingBitrate,
-        enableSctp: true,
-        numSctpStreams: { OS: 1024, MIS: 1024 },
-        maxSctpMessageSize: 262144,
-        iceConsentTimeout: 60,
-        iceRetransmissionTimeout: 1000,
-        additionalSettings: {
-          iceTransportPolicy: "all",
-          iceCandidatePoolSize: 10,
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" },
-            { urls: "stun:stun2.l.google.com:19302" },
-            { urls: "stun:stun3.l.google.com:19302" },
-            { urls: "stun:stun4.l.google.com:19302" },
-            { urls: "stun:stun.stunprotocol.org:3478" },
-          ],
-        },
-      };
-      router
-        .createWebRtcTransport(transportOptions)
-        .then(async (transport) => {
-          clearTimeout(timeout);
-          console.log(`${LOG_PREFIX} WebRTC transport created with ID: ${transport.id}`);
-          try {
-            if (maxIncomingBitrate) {
-              await transport.setMaxIncomingBitrate(maxIncomingBitrate);
-              console.log(`${LOG_PREFIX} Set max incoming bitrate to ${maxIncomingBitrate} on transport ${transport.id}`);
-            }
-            transport.on("routerclose", () => {
-              console.log(`${LOG_PREFIX} Transport ${transport.id} closed due to router closure`);
-            });
-            transport.on("icestatechange", (iceState) => {
-              console.log(`${LOG_PREFIX} Transport ${transport.id} ICE state changed to ${iceState}`);
-              if (iceState === "failed") {
-                console.warn(`${LOG_PREFIX} ICE failed for transport ${transport.id}, attempting restart`);
-                transport.restartIce()
-                  .then(() => console.log(`${LOG_PREFIX} ICE restarted for transport ${transport.id}`))
-                  .catch((error) => console.error(`${LOG_PREFIX} Error restarting ICE for transport ${transport.id}: ${error}`));
-              }
-            });
-            transport.on("dtlsstatechange", (dtlsState) => {
-              console.log(`${LOG_PREFIX} Transport ${transport.id} DTLS state changed to ${dtlsState}`);
-              if (dtlsState === "failed" || dtlsState === "closed") {
-                console.error(`${LOG_PREFIX} Transport ${transport.id} DTLS state is ${dtlsState}`);
-              }
-            });
-            transport.on("sctpstatechange", (sctpState) => {
-              console.log(`${LOG_PREFIX} Transport ${transport.id} SCTP state changed to ${sctpState}`);
-            });
-            resolve({
-              transport,
-              params: {
-                id: transport.id,
-                iceParameters: transport.iceParameters,
-                iceCandidates: transport.iceCandidates,
-                dtlsParameters: transport.dtlsParameters,
-                sctpParameters: transport.sctpParameters,
-              },
-            });
-          } catch (error) {
-            clearTimeout(timeout);
-            console.error(`${LOG_PREFIX} Error during WebRTC transport setup:`, error);
-            reject(error);
+    const transportOptions = {
+      listenIps,
+      enableUdp: true,
+      enableTcp: true,
+      preferUdp: true,
+      initialAvailableOutgoingBitrate,
+      enableSctp: true,
+      numSctpStreams: { OS: 1024, MIS: 1024 },
+      maxSctpMessageSize: 262144,
+      iceConsentTimeout: 60,
+      iceRetransmissionTimeout: 1000,
+      additionalSettings: {
+        iceTransportPolicy: "all",
+        iceCandidatePoolSize: 10,
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun2.l.google.com:19302" },
+          { urls: "stun:stun3.l.google.com:19302" },
+          { urls: "stun:stun4.l.google.com:19302" },
+          { urls: "stun:stun.stunprotocol.org:3478" },
+        ],
+      },
+    };
+    router.createWebRtcTransport(transportOptions)
+      .then(async (transport) => {
+        clearTimeout(timeout);
+        console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.id}`);
+        if (maxIncomingBitrate) {
+          await transport.setMaxIncomingBitrate(maxIncomingBitrate);
+          console.log(`${LOG_PREFIX} Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
+        }
+        transport.on("routerclose", () => console.log(`${LOG_PREFIX} Transport ${transport.id} closed (router closed)`));
+        transport.on("icestatechange", (state) => {
+          console.log(`${LOG_PREFIX} Transport ${transport.id} ICE state: ${state}`);
+          if (state === "failed") {
+            transport.restartIce()
+              .then(() => console.log(`${LOG_PREFIX} ICE restarted for ${transport.id}`))
+              .catch((error) => console.error(`${LOG_PREFIX} ICE restart error for ${transport.id}:`, error));
           }
-        })
-        .catch((error) => {
-          clearTimeout(timeout);
-          console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
-          reject(error);
         });
-    } catch (error) {
-      clearTimeout(timeout);
-      console.error(`${LOG_PREFIX} Exception in createWebRtcTransport:`, error);
-      reject(error);
-    }
+        transport.on("dtlsstatechange", (state) => {
+          console.log(`${LOG_PREFIX} Transport ${transport.id} DTLS state: ${state}`);
+        });
+        transport.on("sctpstatechange", (state) => {
+          console.log(`${LOG_PREFIX} Transport ${transport.id} SCTP state: ${state}`);
+        });
+        resolve({
+          transport,
+          params: {
+            id: transport.id,
+            iceParameters: transport.iceParameters,
+            iceCandidates: transport.iceCandidates,
+            dtlsParameters: transport.dtlsParameters,
+            sctpParameters: transport.sctpParameters,
+          },
+        });
+      })
+      .catch((error) => {
+        clearTimeout(timeout);
+        console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+        reject(error);
+      });
   });
 }
-
-// ------------------------------
-// Socket / Room Management
-// ------------------------------
-function getPeerForSocket(socket) {
-  const roomName = socket.data.roomName;
-  if (!roomName) {
-    console.warn(`${LOG_PREFIX} getPeerForSocket: No roomName for socket ${socket.id}`);
-    return null;
-  }
-  const room = rooms.get(roomName);
-  if (!room) {
-    console.warn(`${LOG_PREFIX} getPeerForSocket: Room ${roomName} not found for socket ${socket.id}`);
-    return null;
-  }
-  return room.peers.get(socket.id);
-}
-
-async function closeAndCleanupRoom(roomName) {
-  console.log(`${LOG_PREFIX} Closing and cleaning up room ${roomName}`);
-  const room = rooms.get(roomName);
-  if (!room) {
-    console.warn(`${LOG_PREFIX} Room ${roomName} not found during cleanup`);
-    return;
-  }
-  try {
-    room.router.close();
-    console.log(`${LOG_PREFIX} Closed router for room ${roomName}`);
-  } catch (e) {
-    console.error(`${LOG_PREFIX} Error closing router for room ${roomName}:`, e);
-  }
-  releaseWorker(room.worker);
-  rooms.delete(roomName);
-  console.log(`${LOG_PREFIX} Room ${roomName} removed from active rooms`);
-}
-
-setInterval(() => {
-  console.log(`${LOG_PREFIX} Running periodic room cleanup...`);
-  const now = Date.now();
-  for (const [roomName, room] of rooms.entries()) {
-    if (room.peers.size === 0 && now - room.creationTime > 60 * 60 * 1000) {
-      console.log(`${LOG_PREFIX} Room ${roomName} is empty and older than 1 hour. Cleaning up.`);
-      closeAndCleanupRoom(roomName);
-    }
-  }
-}, 15 * 60 * 1000);
-
-const activeSockets = new Map();
 
 io.on("connection", (socket) => {
-  console.log(`${LOG_PREFIX} New socket connection established: ${socket.id}`);
-  activeSockets.set(socket.id, {
-    socket,
-    lastActivity: Date.now(),
-    roomName: null,
-  });
-  socket.on("disconnect", (reason) => {
-    console.log(`${LOG_PREFIX} Socket ${socket.id} disconnected. Reason: ${reason}`);
-    handleUserLeaving(socket);
-    activeSockets.delete(socket.id);
-  });
-  socket.on("error", (error) => {
-    console.error(`${LOG_PREFIX} Socket ${socket.id} encountered an error:`, error);
-  });
-  socket.on("ping", (callback) => {
-    console.log(`${LOG_PREFIX} Ping received from socket ${socket.id}`);
-    if (typeof callback === "function") {
-      callback();
-    }
-  });
-  socket.on("heartbeat", () => {
-    if (activeSockets.has(socket.id)) {
-      const socketData = activeSockets.get(socket.id);
-      socketData.lastActivity = Date.now();
-      activeSockets.set(socket.id, socketData);
-      console.log(`${LOG_PREFIX} Heartbeat received from socket ${socket.id}`);
-    }
-  });
-
+  console.log(`${LOG_PREFIX} New socket connection: ${socket.id}`);
   socket.data = {};
 
-  socket.on("joinRoom", async ({ roomName, userId, userName, userEmail }, callback) => {
-    console.log(`${LOG_PREFIX} joinRoom event received from socket ${socket.id} for room ${roomName}`);
-    if (!roomName) {
-      console.error(`${LOG_PREFIX} Room name is undefined`);
-      socket.emit("error", { message: "Room name is required" });
-      return;
-    }
-    socket.data.roomName = roomName;
-    socket.data.userId = userId;
-    socket.data.userName = userName;
-    socket.data.userEmail = userEmail;
+  socket.on("joinRoom", async (data, callback) => {
     try {
+      const { roomName, userId, userName, userEmail } = data;
+      if (!roomName) throw new Error("Room name is required");
+      socket.data.roomName = roomName;
+      socket.data.userId = userId;
+      socket.data.userName = userName;
+      socket.data.userEmail = userEmail;
       const room = await getOrCreateRoom(roomName);
       room.peers.set(socket.id, {
         socket,
@@ -517,115 +368,170 @@ io.on("connection", (socket) => {
         userEmail,
       });
       socket.join(roomName);
-      console.log(`${LOG_PREFIX} User ${userId} (${userName}, ${userEmail}) joined room ${roomName}`);
-      const roomParticipants = [];
-      for (const [_, peer] of room.peers.entries()) {
+      console.log(`${LOG_PREFIX} User ${userId} (${userName}) joined room ${roomName}`);
+
+      const participants = [];
+      for (const [id, peer] of room.peers.entries()) {
         if (peer.userId !== userId) {
-          roomParticipants.push({
+          participants.push({
             userId: peer.userId,
             userName: peer.userName,
             userInitials: peer.userName.substring(0, 2),
           });
         }
       }
-      console.log(`${LOG_PREFIX} Room ${roomName} participants:`, roomParticipants);
-      socket.emit("roomUsers", roomParticipants);
+      socket.emit("roomUsers", participants);
       socket.to(roomName).emit("userJoined", {
         userId,
         userName,
         userInitials: userName.substring(0, 2),
       });
-      // Send router RTP capabilities using toJSON() if available.
-      const rtpCaps =
-        room.router.rtpCapabilities &&
-        typeof room.router.rtpCapabilities.toJSON === "function"
-          ? room.router.rtpCapabilities.toJSON()
-          : room.router.rtpCapabilities;
-      console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
-      callback({ rtpCapabilities: rtpCaps });
+      callback({ rtpCapabilities: room.router.rtpCapabilities.toJSON() });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error joining room ${roomName} for socket ${socket.id}:`, error);
+      console.error(`${LOG_PREFIX} joinRoom error:`, error);
       socket.emit("error", { message: "Failed to join room", error: error.message });
     }
   });
 
-  socket.on("restartIce", async ({ transportId }) => {
-    console.log(`${LOG_PREFIX} restartIce event for transport ${transportId} from socket ${socket.id}`);
+  socket.on("getRouterRtpCapabilities", (data, callback) => {
+    const room = rooms.get(socket.data.roomName);
+    if (room) {
+      callback({ rtpCapabilities: room.router.rtpCapabilities.toJSON() });
+    } else {
+      callback({ rtpCapabilities: null });
+    }
+  });
+
+  socket.on("transport-connect", (data, callback) => {
+    callback();
+  });
+
+  socket.on("transport-produce", async (data, callback) => {
     try {
-      const { roomName } = socket.data;
-      const room = rooms.get(roomName);
-      if (!room) {
-        console.error(`${LOG_PREFIX} Room ${roomName} not found for socket ${socket.id}`);
-        socket.emit("error", { message: "Room not found" });
-        return;
-      }
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
       const peer = room.peers.get(socket.id);
-      if (!peer) {
-        console.error(`${LOG_PREFIX} Peer not found for socket ${socket.id} in room ${roomName}`);
-        socket.emit("error", { message: "Peer not found" });
-        return;
-      }
-      const transport = peer.transports[transportId];
-      if (!transport) {
-        console.error(`${LOG_PREFIX} Transport ${transportId} not found for socket ${socket.id}`);
-        socket.emit("error", { message: "Transport not found" });
-        return;
-      }
-      console.log(`${LOG_PREFIX} Restarting ICE for transport ${transportId}...`);
-      const iceParameters = await transport.restartIce();
-      console.log(`${LOG_PREFIX} ICE restarted for transport ${transportId}`);
-      socket.emit("iceRestarted", { transportId, iceParameters });
+      if (!peer) throw new Error("Peer not found");
+      const transport = peer.transports[data.transportId];
+      if (!transport) throw new Error("Transport not found");
+      const producer = await transport.produce({
+        kind: data.kind,
+        rtpParameters: data.rtpParameters,
+        appData: data.appData,
+      });
+      peer.producers.set(producer.id, producer);
+      callback({ id: producer.id });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error restarting ICE for transport ${transportId} on socket ${socket.id}:`, error);
+      callback({ error: error.message });
+    }
+  });
+
+  socket.on("transport-recv-connect", (data, callback) => {
+    callback();
+  });
+
+  socket.on("consume", async (data, callback) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+      const peer = room.peers.get(socket.id);
+      if (!peer) throw new Error("Peer not found");
+      const consumerTransport = peer.transports[data.serverConsumerTransportId];
+      if (!consumerTransport) throw new Error("Consumer transport not found");
+      const consumer = await consumerTransport.consume({
+        producerId: data.remoteProducerId,
+        rtpCapabilities: data.rtpCapabilities,
+      });
+      peer.consumers.set(consumer.id, consumer);
+      callback({
+        id: consumer.id,
+        producerId: data.remoteProducerId,
+        kind: consumer.kind,
+        rtpParameters: consumer.rtpParameters,
+        serverConsumerId: consumer.id,
+      });
+    } catch (error) {
+      callback({ error: error.message });
+    }
+  });
+
+  socket.on("consumer-resume", (data, callback) => {
+    callback();
+  });
+
+  socket.on("restartIce", async (data) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+      const peer = room.peers.get(socket.id);
+      if (!peer) throw new Error("Peer not found");
+      const transport = peer.transports[data.transportId];
+      if (!transport) throw new Error("Transport not found");
+      const iceParameters = await transport.restartIce();
+      socket.emit("iceRestarted", { transportId: data.transportId, iceParameters });
+    } catch (error) {
       socket.emit("error", { message: "Failed to restart ICE", error: error.message });
     }
   });
+
+  socket.on("disconnect", (reason) => {
+    console.log(`${LOG_PREFIX} Socket ${socket.id} disconnected. Reason: ${reason}`);
+    handleUserLeaving(socket);
+  });
 });
 
-// Helper: handleUserLeaving
 function handleUserLeaving(socket) {
   const roomName = socket.data.roomName;
   if (!roomName) return;
   const room = rooms.get(roomName);
   if (!room) return;
-  const peer = room.peers.get(socket.id);
-  if (!peer) return;
   socket.to(roomName).emit("userLeft", { userId: socket.data.userId });
-  // Close all transports.
-  for (const key in peer.transports) {
-    try {
-      peer.transports[key].close();
-    } catch (e) {
-      console.error(`${LOG_PREFIX} Error closing transport ${key} for socket ${socket.id}:`, e);
+  const peer = room.peers.get(socket.id);
+  if (peer) {
+    for (const key in peer.transports) {
+      try {
+        peer.transports[key].close();
+      } catch (e) {
+        console.error(`${LOG_PREFIX} Error closing transport ${key} for socket ${socket.id}:`, e);
+      }
     }
-  }
-  // Close producers and inform other clients.
-  peer.producers.forEach((producer) => {
-    try {
-      producer.close();
-    } catch (e) {
-      console.error(`${LOG_PREFIX} Error closing producer ${producer.id} for socket ${socket.id}:`, e);
-    }
-    socket.to(roomName).emit("producerClosed", {
-      remoteProducerId: producer.id,
-      userId: socket.data.userId,
+    peer.producers.forEach((producer) => {
+      try {
+        producer.close();
+      } catch (e) {
+        console.error(`${LOG_PREFIX} Error closing producer ${producer.id} for socket ${socket.id}:`, e);
+      }
+      socket.to(roomName).emit("producerClosed", { remoteProducerId: producer.id, userId: socket.data.userId });
     });
-  });
-  // Close consumers.
-  peer.consumers.forEach((consumer) => {
-    try {
-      consumer.close();
-    } catch (e) {
-      console.error(`${LOG_PREFIX} Error closing consumer ${consumer.id} for socket ${socket.id}:`, e);
-    }
-  });
+    peer.consumers.forEach((consumer) => {
+      try {
+        consumer.close();
+      } catch (e) {
+        console.error(`${LOG_PREFIX} Error closing consumer ${consumer.id} for socket ${socket.id}:`, e);
+      }
+    });
+  }
   room.peers.delete(socket.id);
   socket.leave(roomName);
-  console.log(`${LOG_PREFIX} User ${socket.data.userId} removed from room ${roomName}`);
+  console.log(`${LOG_PREFIX} User ${socket.data.userId} left room ${roomName}`);
   if (room.peers.size === 0) {
-    console.log(`${LOG_PREFIX} Room ${roomName} is now empty. Initiating cleanup.`);
+    console.log(`${LOG_PREFIX} Room ${roomName} is empty. Cleaning up.`);
     closeAndCleanupRoom(roomName);
   }
+}
+
+async function closeAndCleanupRoom(roomName) {
+  const room = rooms.get(roomName);
+  if (!room) return;
+  try {
+    room.router.close();
+    console.log(`${LOG_PREFIX} Closed router for room ${roomName}`);
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error closing router for room ${roomName}:`, error);
+  }
+  releaseWorker(room.worker);
+  rooms.delete(roomName);
+  console.log(`${LOG_PREFIX} Room ${roomName} removed from active rooms`);
 }
 
 const PORT = process.env.PORT || 3002;
@@ -634,26 +540,22 @@ server.listen(PORT, () => {
   console.log(`${LOG_PREFIX} Environment: ${process.env.NODE_ENV || "development"}`);
   console.log(`${LOG_PREFIX} Workers count: ${workers.length}`);
   console.log(`${LOG_PREFIX} Announced IP: ${process.env.ANNOUNCED_IP || "default"}`);
-  console.log(`${LOG_PREFIX} CORS setting: ${process.env.CORS_ORIGIN || "all origins"}`);
   console.log(`${LOG_PREFIX} Available endpoints:`);
   console.log(`${LOG_PREFIX} - GET /health`);
   console.log(`${LOG_PREFIX} - GET /`);
-  console.log(`${LOG_PREFIX} - WebSocket (Socket.io) connection`);
+  console.log(`${LOG_PREFIX} - WebSocket connection`);
 });
 
-server.on("error", (error) => {
-  console.error(`${LOG_PREFIX} Server encountered an error:`, error);
+io.on("error", (error) => {
+  console.error(`${LOG_PREFIX} Socket.io server error:`, error);
 });
 
-process.on("SIGINT", () => {
-  console.log(`${LOG_PREFIX} Received SIGINT, shutting down gracefully`);
-  cleanupAndExit();
+io.engine.on("connection_error", (err) => {
+  console.error(`${LOG_PREFIX} Socket.io connection error:`, err);
 });
 
-process.on("SIGTERM", () => {
-  console.log(`${LOG_PREFIX} Received SIGTERM, shutting down gracefully`);
-  cleanupAndExit();
-});
+process.on("SIGINT", cleanupAndExit);
+process.on("SIGTERM", cleanupAndExit);
 
 function cleanupAndExit() {
   console.log(`${LOG_PREFIX} Cleaning up rooms before exit...`);
@@ -676,12 +578,4 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
   next();
-});
-
-io.on("error", (error) => {
-  console.error(`${LOG_PREFIX} Socket.io server error:`, error);
-});
-
-io.engine.on("connection_error", (err) => {
-  console.error(`${LOG_PREFIX} Socket.io connection error:`, err);
 });
