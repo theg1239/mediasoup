@@ -429,22 +429,14 @@ io.on("connection", (socket) => {
           });
         }
       }
+
       socket.emit("roomUsers", participants);
 
-      // Collect existing producers from all peers
-      const existingProducers = [];
-      for (const [id, peer] of room.peers.entries()) {
-        if (peer.socket.id !== socket.id) {
-          for (const [producerId, producer] of peer.producers.entries()) {
-            existingProducers.push({
-              producerId,
-              producerUserId: peer.userId,
-              kind: producer.kind,
-              rtpParameters: producer.rtpParameters
-            });
-          }
-        }
-      }
+      socket.to(roomName).emit("userJoined", {
+        userId,
+        userName,
+        userInitials: userName.substring(0, 2)
+      });
 
       const rtpCaps = (room.router &&
         typeof room.router.rtpCapabilities.toJSON === "function")
@@ -452,14 +444,7 @@ io.on("connection", (socket) => {
         : room.router.rtpCapabilities;
       
       console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
-      safeCallback(callback, { rtpCapabilities: rtpCaps, existingProducers });
-      
-      // Notify others about the new user
-      socket.to(roomName).emit("userJoined", {
-        userId,
-        userName,
-        userInitials: userName.substring(0, 2)
-      });
+      safeCallback(callback, { rtpCapabilities: rtpCaps });
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
       safeCallback(callback, { error: error.message });
@@ -592,10 +577,10 @@ io.on("connection", (socket) => {
       const room = rooms.get(socket.data.roomName);
       if (!room) throw new Error("Room not found");
 
-      const { roomId, userId, userName, message } = data;
+      const { userId, userName, message } = data;
       console.log(`${LOG_PREFIX} Chat message from ${userName}: ${message}`);
 
-      io.to(roomId).emit("chatMessage", {
+      io.to(socket.data.roomName).emit("chatMessage", {
         userId,
         userName,
         message,
@@ -603,6 +588,41 @@ io.on("connection", (socket) => {
       });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error handling chat message:`, error);
+    }
+  });
+
+  socket.on("mediaStateChanged", (data) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+
+      const { userId, audioEnabled, videoEnabled } = data;
+      console.log(`${LOG_PREFIX} Media state changed for user ${userId}: audio=${audioEnabled}, video=${videoEnabled}`);
+
+      io.to(socket.data.roomName).emit("mediaStateChanged", {
+        userId,
+        audioEnabled,
+        videoEnabled
+      });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error handling media state change:`, error);
+    }
+  });
+
+  socket.on("userTyping", (data) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) throw new Error("Room not found");
+
+      const { userId, userName, isTyping } = data;
+      
+      socket.to(socket.data.roomName).emit("userTyping", {
+        userId,
+        userName,
+        isTyping
+      });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error handling typing indicator:`, error);
     }
   });
 
