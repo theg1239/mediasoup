@@ -277,11 +277,13 @@ function getLeastLoadedWorker() {
   return worker;
 }
 
+// this is very important worker logic to handle load
 function releaseWorker(worker) {
   const current = workerLoadCount.get(worker) || 0;
   if (current > 0) {
-    workerLoadCount.set(worker, current - 1);
-    console.log(`${LOG_PREFIX} Released worker PID ${worker.pid} (new load: ${current - 1})`);
+    const newLoad = Math.max(0, current - 0.25); 
+    workerLoadCount.set(worker, newLoad);
+    console.log(`${LOG_PREFIX} Released worker PID ${worker.pid} (new load: ${newLoad})`);
   } else {
     console.warn(`${LOG_PREFIX} Worker PID ${worker.pid} already has load 0`);
   }
@@ -304,17 +306,24 @@ async function getOrCreateRoom(roomName) {
   }
   const promise = new Promise(async (resolve, reject) => {
     try {
+      // Get least loaded worker - we'll reuse workers across rooms
       const worker = getLeastLoadedWorker();
       const router = await worker.createRouter({ mediaCodecs: mediasoupOptions.router.mediaCodecs });
       console.log(`${LOG_PREFIX} Router created for room ${roomName} on worker PID ${worker.pid}`);
       room = {
         id: roomName,
         router,
-        worker,
+        worker, // We still track which worker the room is using
         peers: new Map(),
         creationTime: Date.now()
       };
       rooms.set(roomName, room);
+      
+      // Update worker load count based on number of routers/rooms it handles
+      const currentLoad = workerLoadCount.get(worker) || 0;
+      workerLoadCount.set(worker, currentLoad + 0.25); // Increment by smaller amount since rooms share workers
+      console.log(`${LOG_PREFIX} Updated worker ${worker.pid} load to ${currentLoad + 0.25} after adding room ${roomName}`);
+      
       resolve(room);
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating room ${roomName}:`, error);
