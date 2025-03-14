@@ -187,6 +187,29 @@ const roomsInCreation = new Map();
 let workers = [];
 const workerLoadCount = new Map();
 const rooms = new Map();
+// Add breakout rooms tracking
+const breakoutRooms = new Map(); // Maps main room ID to array of breakout room IDs
+const breakoutToMainRoom = new Map(); // Maps breakout room ID to main room ID
+const adminUsers = new Map(); // Maps user email to boolean (true if admin)
+
+// Helper function to check if a user is an admin
+function isAdmin(userEmail) {
+  if (!userEmail) return false;
+  
+  // Check if we've already cached this user's admin status
+  if (adminUsers.has(userEmail)) {
+    return adminUsers.get(userEmail);
+  }
+  
+  // Parse admin emails from environment variable
+  const adminEmails = (process.env.FACETIME_ADMINS || "").split(",").map(email => email.trim().toLowerCase());
+  const isUserAdmin = adminEmails.includes(userEmail.toLowerCase());
+  
+  // Cache the result
+  adminUsers.set(userEmail, isUserAdmin);
+  
+  return isUserAdmin;
+}
 
 // ------------------------------
 // Create Mediasoup Workers
@@ -402,6 +425,11 @@ io.on("connection", (socket) => {
       socket.data.userName = userName;
       socket.data.userEmail = userEmail;
       
+      // Check if this is a breakout room and get the main room ID
+      const mainRoomId = breakoutToMainRoom.get(roomName);
+      socket.data.isInBreakoutRoom = !!mainRoomId;
+      socket.data.mainRoomId = mainRoomId;
+      
       const room = await getOrCreateRoom(roomName);
       
       room.peers.set(socket.id, {
@@ -412,7 +440,8 @@ io.on("connection", (socket) => {
         userId,
         userName,
         userEmail,
-        deviceReady: false
+        deviceReady: false,
+        isAdmin: isAdmin(userEmail)
       });
       
       socket.join(roomName);
@@ -430,21 +459,49 @@ io.on("connection", (socket) => {
         }
       }
 
+      // Send participants list to the joining user
       socket.emit("roomUsers", participants);
 
+      // Notify others about the new user
       socket.to(roomName).emit("userJoined", {
         userId,
         userName,
         userInitials: userName.substring(0, 2)
       });
 
+      // Check if user is an admin and notify them
+      const userIsAdmin = isAdmin(userEmail);
+      if (userIsAdmin) {
+        console.log(`${LOG_PREFIX} Admin user ${userName} (${userEmail}) joined room ${roomName}`);
+        
+        // If this is a main room, send breakout room info if any exist
+        if (!socket.data.isInBreakoutRoom) {
+          const breakoutRoomIds = breakoutRooms.get(roomName) || [];
+          if (breakoutRoomIds.length > 0) {
+            socket.emit("breakoutRoomsCreated", {
+              mainRoomId: roomName,
+              breakoutRooms: breakoutRoomIds.map((id, index) => ({
+                id,
+                name: `Breakout Room ${index + 1}`
+              }))
+            });
+          }
+        }
+      }
+
+      // Send router capabilities
       const rtpCaps = (room.router &&
         typeof room.router.rtpCapabilities.toJSON === "function")
         ? room.router.rtpCapabilities.toJSON()
         : room.router.rtpCapabilities;
       
       console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
-      safeCallback(callback, { rtpCapabilities: rtpCaps });
+      safeCallback(callback, { 
+        rtpCapabilities: rtpCaps,
+        isAdmin: userIsAdmin,
+        isBreakoutRoom: socket.data.isInBreakoutRoom,
+        mainRoomId: socket.data.mainRoomId
+      });
     } catch (error) {
       console.error(`${LOG_PREFIX} joinRoom error:`, error);
       safeCallback(callback, { error: error.message });
@@ -580,6 +637,7 @@ io.on("connection", (socket) => {
       const { userId, userName, message } = data;
       console.log(`${LOG_PREFIX} Chat message from ${userName}: ${message}`);
 
+      // Broadcast to all clients in the room (including sender)
       io.to(socket.data.roomName).emit("chatMessage", {
         userId,
         userName,
@@ -623,6 +681,202 @@ io.on("connection", (socket) => {
       });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error handling typing indicator:`, error);
+    }
+  });
+
+  // ------------------------------
+  // Breakout Room & Admin Operations
+  // ------------------------------
+  
+  socket.on("createBreakoutRooms", async (data, callback) => {
+    try {
+      const { count, mainRoomId } = data;
+      const userEmail = socket.data.userEmail;
+      
+      if (!isAdmin(userEmail)) {
+        safeCallback(callback, { error: "Unauthorized: Only admins can create breakout rooms" });
+        return;
+      }
+      
+      const mainRoom = rooms.get(mainRoomId);
+      if (!mainRoom) {
+        safeCallback(callback, { error: "Main room not found" });
+        return;
+      }
+      
+      console.log(`${LOG_PREFIX} Admin ${userEmail} creating ${count} breakout rooms for main room ${mainRoomId}`);
+      
+      const breakoutRoomIds = [];
+      for (let i = 0; i < count; i++) {
+        const breakoutRoomId = `${mainRoomId}-breakout-${i+1}`;
+        await getOrCreateRoom(breakoutRoomId);
+        breakoutRoomIds.push(breakoutRoomId);
+        breakoutToMainRoom.set(breakoutRoomId, mainRoomId);
+      }
+      
+      breakoutRooms.set(mainRoomId, breakoutRoomIds);
+      
+      io.to(mainRoomId).emit("breakoutRoomsCreated", {
+        mainRoomId,
+        breakoutRooms: breakoutRoomIds.map((id, index) => ({
+          id,
+          name: `Breakout Room ${index + 1}`
+        }))
+      });
+      
+      safeCallback(callback, { success: true, breakoutRooms: breakoutRoomIds });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error creating breakout rooms:`, error);
+      safeCallback(callback, { error: error.message });
+    }
+  });
+  
+  socket.on("assignToBreakoutRoom", async (data, callback) => {
+    try {
+      const { userId, breakoutRoomId, mainRoomId } = data;
+      const userEmail = socket.data.userEmail;
+      
+      if (!isAdmin(userEmail)) {
+        safeCallback(callback, { error: "Unauthorized: Only admins can assign users to breakout rooms" });
+        return;
+      }
+      
+      const breakoutRoomsForMain = breakoutRooms.get(mainRoomId) || [];
+      if (!breakoutRoomsForMain.includes(breakoutRoomId)) {
+        safeCallback(callback, { error: "Invalid breakout room for this main room" });
+        return;
+      }
+      
+      const mainRoom = rooms.get(mainRoomId);
+      if (!mainRoom) {
+        safeCallback(callback, { error: "Main room not found" });
+        return;
+      }
+      
+      let userSocket = null;
+      let userName = "";
+      let userEmailToMove = "";
+      
+      for (const [socketId, peer] of mainRoom.peers.entries()) {
+        if (peer.userId === userId) {
+          const peerSocket = io.sockets.sockets.get(socketId);
+          if (peerSocket) {
+            userSocket = peerSocket;
+            userName = peer.userName;
+            userEmailToMove = peer.userEmail;
+            break;
+          }
+        }
+      }
+      
+      if (!userSocket) {
+        safeCallback(callback, { error: "User not found in main room" });
+        return;
+      }
+      
+      console.log(`${LOG_PREFIX} Admin ${userEmail} moving user ${userId} (${userName}) to breakout room ${breakoutRoomId}`);
+      
+      userSocket.emit("moveToBreakoutRoom", {
+        breakoutRoomId,
+        mainRoomId
+      });
+      
+      socket.to(mainRoomId).emit("userAssignedToBreakoutRoom", {
+        userId,
+        userName,
+        breakoutRoomId
+      });
+      
+      safeCallback(callback, { success: true });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error assigning user to breakout room:`, error);
+      safeCallback(callback, { error: error.message });
+    }
+  });
+  
+  socket.on("returnAllToMainRoom", async (data, callback) => {
+    try {
+      const { mainRoomId } = data;
+      const userEmail = socket.data.userEmail;
+      
+      if (!isAdmin(userEmail)) {
+        safeCallback(callback, { error: "Unauthorized: Only admins can return users to main room" });
+        return;
+      }
+      
+      const breakoutRoomIds = breakoutRooms.get(mainRoomId) || [];
+      
+      console.log(`${LOG_PREFIX} Admin ${userEmail} returning all users from ${breakoutRoomIds.length} breakout rooms to main room ${mainRoomId}`);
+      
+      for (const breakoutRoomId of breakoutRoomIds) {
+        io.to(breakoutRoomId).emit("returnToMainRoom", {
+          mainRoomId
+        });
+      }
+      
+      safeCallback(callback, { success: true });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error returning all users to main room:`, error);
+      safeCallback(callback, { error: error.message });
+    }
+  });
+  
+  socket.on("checkAdminStatus", (data, callback) => {
+    try {
+      const userEmail = socket.data.userEmail || data.userEmail;
+      const isUserAdmin = isAdmin(userEmail);
+      
+      console.log(`${LOG_PREFIX} Checking admin status for ${userEmail}: ${isUserAdmin}`);
+      
+      safeCallback(callback, { isAdmin: isUserAdmin });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error checking admin status:`, error);
+      safeCallback(callback, { error: error.message });
+    }
+  });
+  
+  socket.on("getBreakoutRooms", (data, callback) => {
+    try {
+      const { mainRoomId } = data;
+      const breakoutRoomIds = breakoutRooms.get(mainRoomId) || [];
+      
+      const formattedBreakoutRooms = breakoutRoomIds.map((id, index) => ({
+        id,
+        name: `Breakout Room ${index + 1}`
+      }));
+      
+      safeCallback(callback, { breakoutRooms: formattedBreakoutRooms });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error getting breakout rooms:`, error);
+      safeCallback(callback, { error: error.message });
+    }
+  });
+  
+  socket.on("broadcastToBreakoutRooms", (data, callback) => {
+    try {
+      const { mainRoomId, message } = data;
+      const userEmail = socket.data.userEmail;
+      
+      if (!isAdmin(userEmail)) {
+        safeCallback(callback, { error: "Unauthorized: Only admins can broadcast to breakout rooms" });
+        return;
+      }
+      
+      const breakoutRoomIds = breakoutRooms.get(mainRoomId) || [];
+      
+      console.log(`${LOG_PREFIX} Admin ${userEmail} broadcasting message to ${breakoutRoomIds.length} breakout rooms`);
+      
+      for (const breakoutRoomId of breakoutRoomIds) {
+        io.to(breakoutRoomId).emit("adminBroadcast", {
+          message,
+          fromAdmin: socket.data.userName
+        });
+      }
+      
+      safeCallback(callback, { success: true });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error broadcasting to breakout rooms:`, error);
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -847,9 +1101,38 @@ function handleUserLeaving(socket) {
   room.peers.delete(socket.id);
   socket.leave(roomName);
   console.log(`${LOG_PREFIX} User ${socket.data.userId} left room ${roomName}`);
+  
+  // If this is a breakout room and it's now empty, notify the main room
+  if (socket.data.isInBreakoutRoom && socket.data.mainRoomId && room.peers.size === 0) {
+    const mainRoom = rooms.get(socket.data.mainRoomId);
+    if (mainRoom) {
+      io.to(socket.data.mainRoomId).emit("breakoutRoomEmpty", {
+        breakoutRoomId: roomName
+      });
+    }
+  }
+  
   if (room.peers.size === 0) {
     console.log(`${LOG_PREFIX} Room ${roomName} is empty. Cleaning up.`);
     closeAndCleanupRoom(roomName);
+    
+    // If this was a main room with breakout rooms, clean those up too
+    const breakoutRoomIds = breakoutRooms.get(roomName) || [];
+    if (breakoutRoomIds.length > 0) {
+      console.log(`${LOG_PREFIX} Cleaning up ${breakoutRoomIds.length} breakout rooms for main room ${roomName}`);
+      breakoutRoomIds.forEach(breakoutRoomId => {
+        const breakoutRoom = rooms.get(breakoutRoomId);
+        if (breakoutRoom) {
+          // Notify any remaining users in breakout rooms that the main room is closed
+          io.to(breakoutRoomId).emit("mainRoomClosed", {
+            mainRoomId: roomName
+          });
+          closeAndCleanupRoom(breakoutRoomId);
+        }
+        breakoutToMainRoom.delete(breakoutRoomId);
+      });
+      breakoutRooms.delete(roomName);
+    }
   }
 }
 
