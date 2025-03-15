@@ -277,11 +277,10 @@ function getLeastLoadedWorker() {
   return worker;
 }
 
-// this is very important worker logic to handle load
 function releaseWorker(worker) {
   const current = workerLoadCount.get(worker) || 0;
   if (current > 0) {
-    const newLoad = Math.max(0, current - 0.25); 
+    const newLoad = Math.max(0, current - 0.25); // Decrement by same amount we increment
     workerLoadCount.set(worker, newLoad);
     console.log(`${LOG_PREFIX} Released worker PID ${worker.pid} (new load: ${newLoad})`);
   } else {
@@ -424,473 +423,432 @@ io.on("connection", (socket) => {
   console.log(`${LOG_PREFIX} New socket connection: ${socket.id}`);
   socket.data = {};
 
-  // joinRoom: add peer to room, send back RTP capabilities and notify others.
+  // Handle user joining a room
   socket.on("joinRoom", async (data, callback) => {
     try {
-      const { roomName, userId, userName, userEmail } = data;
-      if (!roomName) throw new Error("Room name is required");
-      socket.data.roomName = roomName;
-      socket.data.userId = userId;
-      socket.data.userName = userName;
-      socket.data.userEmail = userEmail;
+      const { roomName, userId, userName, userEmail, mainRoomId } = data;
+      console.log(`${LOG_PREFIX} User ${userName} (${userId}) joining room ${roomName}`);
       
-      // Check if this is a breakout room and get the main room ID
-      const mainRoomId = breakoutToMainRoom.get(roomName);
-      socket.data.isInBreakoutRoom = !!mainRoomId;
-      socket.data.mainRoomId = mainRoomId;
+      // Check if this is a breakout room join
+      const isBreakoutRoom = mainRoomId ? true : false;
       
+      // Get or create the room
       const room = await getOrCreateRoom(roomName);
       
-      room.peers.set(socket.id, {
+      // Check if user is already in the room
+      if (room.peers.has(socket.id)) {
+        console.log(`${LOG_PREFIX} User ${userName} (${userId}) already in room ${roomName}`);
+        // Just update the callback with current state
+        callback({
+          rtpCapabilities: room.router.rtpCapabilities,
+          isAdmin: isAdmin(userEmail),
+          isBreakoutRoom,
+          mainRoomId
+        });
+        return;
+      }
+      
+      // Add user to the room
+      const peer = {
         socket,
-        transports: {},
-        producers: new Map(),
-        consumers: new Map(),
         userId,
         userName,
         userEmail,
-        deviceReady: false,
-        isAdmin: isAdmin(userEmail)
-      });
+        consumers: new Map(),
+        producers: new Map(),
+        transports: new Map(),
+        rtpCapabilities: null,
+        joinTime: Date.now(),
+        deviceLoaded: false
+      };
       
+      room.peers.set(socket.id, peer);
+      socket.roomName = roomName;
+      socket.userId = userId;
+      socket.userName = userName;
+      
+      // Join the socket room
       socket.join(roomName);
-      console.log(`${LOG_PREFIX} User ${userId} (${userName}) joined room ${roomName}`);
-
-      // Build participants list (excluding current user)
-      const participants = [];
-      for (const [id, peer] of room.peers.entries()) {
-        if (peer.userId !== userId) {
-          participants.push({
-            userId: peer.userId,
-            userName: peer.userName,
-            userInitials: peer.userName.substring(0, 2)
-          });
-        }
-      }
-
-      // Send participants list to the joining user
-      socket.emit("roomUsers", participants);
-
-      // Notify others about the new user
+      
+      // Notify other users in the room
       socket.to(roomName).emit("userJoined", {
         userId,
         userName,
         userInitials: userName.substring(0, 2)
       });
-
-      // Check if user is an admin and notify them
-      const userIsAdmin = isAdmin(userEmail);
-      if (userIsAdmin) {
-        console.log(`${LOG_PREFIX} Admin user ${userName} (${userEmail}) joined room ${roomName}`);
-        
-        // If this is a main room, send breakout room info if any exist
-        if (!socket.data.isInBreakoutRoom) {
-          const breakoutRoomIds = breakoutRooms.get(roomName) || [];
-          if (breakoutRoomIds.length > 0) {
-            socket.emit("breakoutRoomsCreated", {
-              mainRoomId: roomName,
-              breakoutRooms: breakoutRoomIds.map((id, index) => ({
-                id,
-                name: `Breakout Room ${index + 1}`
-              }))
-            });
-          }
-        }
-      }
-
-      // Send router capabilities
-      const rtpCaps = (room.router &&
-        typeof room.router.rtpCapabilities.toJSON === "function")
-        ? room.router.rtpCapabilities.toJSON()
-        : room.router.rtpCapabilities;
       
-      console.log(`${LOG_PREFIX} Sending router RTP capabilities:`, rtpCaps);
-      safeCallback(callback, { 
-        rtpCapabilities: rtpCaps,
-        isAdmin: userIsAdmin,
-        isBreakoutRoom: socket.data.isInBreakoutRoom,
-        mainRoomId: socket.data.mainRoomId
-      });
-    } catch (error) {
-      console.error(`${LOG_PREFIX} joinRoom error:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-
-  socket.on("createWebRtcTransport", async (data, callback) => {
-    try {
-      const room = rooms.get(socket.data.roomName);
-      if (!room) {
-        console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      const peer = room.peers.get(socket.id);
-      if (!peer) {
-        console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
-        safeCallback(callback, { error: "Peer not found" });
-        return;
-      }
-
-      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.data.userId}`);
-      const transport = await createWebRtcTransport(room.router);
-      
-      peer.transports[transport.transport.id] = transport.transport;
-      console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.transport.id}`);
-      
-      safeCallback(callback, {
-        params: {
-          id: transport.transport.id,
-          iceParameters: transport.transport.iceParameters,
-          iceCandidates: transport.transport.iceCandidates,
-          dtlsParameters: transport.transport.dtlsParameters,
-          sctpParameters: transport.transport.sctpParameters
-        }
-      });
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-
-  // Add deviceReady handler
-  socket.on("deviceReady", async () => {
-    try {
-      const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
-      const peer = room.peers.get(socket.id);
-      if (!peer) throw new Error("Peer not found");
-
-      console.log(`${LOG_PREFIX} Device ready for user ${socket.data.userId}`);
-      peer.deviceReady = true;
-
-      // Collect existing producers
+      // Get existing producers for the room
       const existingProducers = [];
-      for (const [id, otherPeer] of room.peers.entries()) {
-        if (otherPeer.socket.id !== socket.id) {
-          for (const [producerId, producer] of otherPeer.producers.entries()) {
+      for (const [peerId, peer] of room.peers.entries()) {
+        if (peerId !== socket.id) {
+          for (const [producerId, producer] of peer.producers.entries()) {
             existingProducers.push({
               producerId,
-              producerUserId: otherPeer.userId,
-              kind: producer.kind,
-              rtpParameters: producer.rtpParameters
+              producerUserId: peer.userId
             });
           }
         }
       }
-
-      // Create consumer transports and consumers for existing producers
-      for (const producerInfo of existingProducers) {
-        try {
-          // Create transport
-          const transport = await createWebRtcTransport(room.router);
-          peer.transports[transport.transport.id] = transport.transport;
-          
-          // Emit transport parameters to client
-          socket.emit("createWebRtcTransport", 
-            { 
-              consumer: true,
-              params: transport.params
-            }
-          );
-
-          // Wait for client to connect transport
-          await new Promise((resolve) => {
-            socket.once("transport-recv-connect", async (data) => {
-              if (data.serverConsumerTransportId === transport.transport.id) {
-                await transport.transport.connect({ dtlsParameters: data.dtlsParameters });
-                resolve();
-              }
-            });
-          });
-
-          // Create consumer
-          const consumer = await transport.transport.consume({
-            producerId: producerInfo.producerId,
-            rtpCapabilities: room.router.rtpCapabilities
-          });
-          
-          peer.consumers.set(consumer.id, consumer);
-          
-          socket.emit("consume", {
-            id: consumer.id,
-            producerId: producerInfo.producerId,
-            kind: consumer.kind,
-            rtpParameters: consumer.rtpParameters,
-            serverConsumerId: consumer.id
-          });
-
-          await new Promise((resolve) => {
-            socket.once("consumer-resume", async (data) => {
-              if (data.serverConsumerId === consumer.id) {
-                await consumer.resume();
-                resolve();
-              }
-            });
-          });
-
-        } catch (error) {
-          console.error(`${LOG_PREFIX} Error creating consumer for existing producer:`, error);
-        }
-      }
+      
+      // Send room info to the client
+      callback({
+        rtpCapabilities: room.router.rtpCapabilities,
+        existingProducers,
+        isAdmin: isAdmin(userEmail),
+        isBreakoutRoom,
+        mainRoomId,
+        chatHistory: room.chatHistory || []
+      });
+      
+      console.log(`${LOG_PREFIX} User ${userName} (${userId}) joined room ${roomName}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling deviceReady:`, error);
+      console.error(`${LOG_PREFIX} Error joining room:`, error);
+      callback({ error: error.message });
     }
   });
 
+  // Handle user leaving a room
+  socket.on("leaveRoom", async (data) => {
+    try {
+      const { roomName, userId, isMovingToBreakoutRoom, isReturningToMainRoom } = data;
+      console.log(`${LOG_PREFIX} User ${socket.userName} (${userId}) leaving room ${roomName}`);
+      
+      // Special handling for breakout room transitions
+      const isTransitioning = isMovingToBreakoutRoom || isReturningToMainRoom;
+      
+      // Get the room
+      const room = rooms.get(roomName);
+      if (!room) {
+        console.log(`${LOG_PREFIX} Room ${roomName} not found for user leaving`);
+        return;
+      }
+      
+      // Get the peer
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        console.log(`${LOG_PREFIX} Peer not found in room ${roomName}`);
+        return;
+      }
+      
+      // Close all transports
+      for (const transport of peer.transports.values()) {
+        try {
+          transport.close();
+        } catch (error) {
+          console.error(`${LOG_PREFIX} Error closing transport:`, error);
+        }
+      }
+      
+      // Remove peer from room
+      room.peers.delete(socket.id);
+      
+      // Leave the socket room
+      socket.leave(roomName);
+      
+      // Notify other users in the room
+      if (!isTransitioning) {
+        socket.to(roomName).emit("userLeft", { userId });
+      }
+      
+      // Check if room is empty
+      if (room.peers.size === 0) {
+        // If this is a breakout room, notify the main room
+        if (room.isBreakoutRoom && room.mainRoomId) {
+          io.to(room.mainRoomId).emit("breakoutRoomEmpty", { breakoutRoomId: roomName });
+        }
+        
+        // Close and cleanup the room if not transitioning
+        if (!isTransitioning) {
+          await closeAndCleanupRoom(roomName);
+        }
+      }
+      
+      console.log(`${LOG_PREFIX} User ${socket.userName} (${userId}) left room ${roomName}`);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error leaving room:`, error);
+    }
+  });
+
+  // Handle screen sharing events
+  socket.on("screenShareStarted", (data) => {
+    try {
+      const { userId, userName, hasCamera } = data;
+      const roomName = socket.roomName;
+      
+      if (!roomName) {
+        console.error(`${LOG_PREFIX} No room found for screen share start`);
+        return;
+      }
+      
+      console.log(`${LOG_PREFIX} User ${userName} (${userId}) started screen sharing in room ${roomName}`);
+      
+      // Broadcast to all users in the room except the sender
+      socket.to(roomName).emit("screenShareStarted", { userId, userName, hasCamera });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error handling screen share start:`, error);
+    }
+  });
+
+  socket.on("screenShareStopped", (data) => {
+    try {
+      const { userId } = data || { userId: socket.userId };
+      const roomName = socket.roomName;
+      
+      if (!roomName) {
+        console.error(`${LOG_PREFIX} No room found for screen share stop`);
+        return;
+      }
+      
+      console.log(`${LOG_PREFIX} User ${socket.userName} (${userId}) stopped screen sharing in room ${roomName}`);
+      
+      // Broadcast to all users in the room except the sender
+      socket.to(roomName).emit("screenShareStopped", { userId });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error handling screen share stop:`, error);
+    }
+  });
+
+  // Handle chat messages
   socket.on("chatMessage", (data) => {
     try {
-      const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
-
-      const { userId, userName, message } = data;
-      console.log(`${LOG_PREFIX} Chat message from ${userName}: ${message}`);
-
-      // Broadcast to all clients in the room (including sender)
-      io.to(socket.data.roomName).emit("chatMessage", {
-        userId,
-        userName,
-        message,
-        timestamp: Date.now()
-      });
+      const { roomId, userId, userName, message, timestamp } = data;
+      
+      if (!roomId) {
+        console.error(`${LOG_PREFIX} No room ID provided for chat message`);
+        return;
+      }
+      
+      console.log(`${LOG_PREFIX} Chat message from ${userName} (${userId}) in room ${roomId}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+      
+      // Add the message to the room's chat history if needed
+      const room = rooms.get(roomId);
+      if (!room) {
+        console.error(`${LOG_PREFIX} Room ${roomId} not found for chat message`);
+        return;
+      }
+      
+      // Initialize chat history if it doesn't exist
+      if (!room.chatHistory) {
+        room.chatHistory = [];
+      }
+      
+      // Add message to history (optional, limit to last 100 messages)
+      const chatMessage = { userId, userName, message, timestamp };
+      room.chatHistory.push(chatMessage);
+      if (room.chatHistory.length > 100) {
+        room.chatHistory.shift(); // Remove oldest message if over 100
+      }
+      
+      // Broadcast to all users in the room (including sender for consistency)
+      io.to(roomId).emit("chatMessage", chatMessage);
     } catch (error) {
       console.error(`${LOG_PREFIX} Error handling chat message:`, error);
     }
   });
 
-  socket.on("mediaStateChanged", (data) => {
+  // Handle room users request
+  socket.on("getRoomUsers", (data) => {
     try {
-      const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
-
-      const { userId, audioEnabled, videoEnabled } = data;
-      console.log(`${LOG_PREFIX} Media state changed for user ${userId}: audio=${audioEnabled}, video=${videoEnabled}`);
-
-      io.to(socket.data.roomName).emit("mediaStateChanged", {
-        userId,
-        audioEnabled,
-        videoEnabled
-      });
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling media state change:`, error);
-    }
-  });
-
-  socket.on("userTyping", (data) => {
-    try {
-      const room = rooms.get(socket.data.roomName);
-      if (!room) throw new Error("Room not found");
-
-      const { userId, userName, isTyping } = data;
+      const { roomId } = data;
       
-      socket.to(socket.data.roomName).emit("userTyping", {
-        userId,
-        userName,
-        isTyping
-      });
+      if (!roomId) {
+        console.error(`${LOG_PREFIX} No room ID provided for getRoomUsers`);
+        return;
+      }
+      
+      console.log(`${LOG_PREFIX} Getting users for room ${roomId}`);
+      
+      const room = rooms.get(roomId);
+      if (!room) {
+        console.error(`${LOG_PREFIX} Room ${roomId} not found for getRoomUsers`);
+        return;
+      }
+      
+      // Collect user information
+      const users = [];
+      for (const [peerId, peer] of room.peers.entries()) {
+        users.push({
+          userId: peer.userId,
+          userName: peer.userName,
+          userInitials: peer.userName.substring(0, 2)
+        });
+      }
+      
+      // Send to the requesting client
+      socket.emit("roomUsers", users);
+      
+      console.log(`${LOG_PREFIX} Sent ${users.length} users for room ${roomId}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling typing indicator:`, error);
+      console.error(`${LOG_PREFIX} Error handling getRoomUsers:`, error);
     }
   });
 
-  // ------------------------------
-  // Breakout Room & Admin Operations
-  // ------------------------------
-  
+  // Handle breakout room creation
   socket.on("createBreakoutRooms", async (data, callback) => {
     try {
       const { count, mainRoomId } = data;
-      const userEmail = socket.data.userEmail;
       
-      if (!isAdmin(userEmail)) {
-        safeCallback(callback, { error: "Unauthorized: Only admins can create breakout rooms" });
+      // Check if user is admin
+      if (!isAdmin(socket.userEmail)) {
+        callback({ error: "Only admins can create breakout rooms" });
         return;
       }
       
+      console.log(`${LOG_PREFIX} Creating ${count} breakout rooms for main room ${mainRoomId}`);
+      
+      // Get the main room
       const mainRoom = rooms.get(mainRoomId);
       if (!mainRoom) {
-        safeCallback(callback, { error: "Main room not found" });
+        callback({ error: "Main room not found" });
         return;
       }
       
-      console.log(`${LOG_PREFIX} Admin ${userEmail} creating ${count} breakout rooms for main room ${mainRoomId}`);
-      
-      const breakoutRoomIds = [];
+      // Create breakout rooms
+      const breakoutRooms = [];
       for (let i = 0; i < count; i++) {
-        const breakoutRoomId = `${mainRoomId}-breakout-${i+1}`;
-        await getOrCreateRoom(breakoutRoomId);
-        breakoutRoomIds.push(breakoutRoomId);
-        breakoutToMainRoom.set(breakoutRoomId, mainRoomId);
+        const breakoutRoomId = `${mainRoomId}-breakout-${i + 1}`;
+        
+        // Create the breakout room
+        const room = await getOrCreateRoom(breakoutRoomId);
+        
+        // Mark as breakout room
+        room.isBreakoutRoom = true;
+        room.mainRoomId = mainRoomId;
+        
+        breakoutRooms.push({
+          id: breakoutRoomId,
+          name: `Breakout Room ${i + 1}`,
+          participants: []
+        });
       }
       
-      breakoutRooms.set(mainRoomId, breakoutRoomIds);
+      // Store breakout rooms in main room
+      mainRoom.breakoutRooms = breakoutRooms;
       
+      // Notify all users in the main room
       io.to(mainRoomId).emit("breakoutRoomsCreated", {
         mainRoomId,
-        breakoutRooms: breakoutRoomIds.map((id, index) => ({
-          id,
-          name: `Breakout Room ${index + 1}`
-        }))
+        breakoutRooms
       });
       
-      safeCallback(callback, { success: true, breakoutRooms: breakoutRoomIds });
+      callback({ success: true, breakoutRooms });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating breakout rooms:`, error);
-      safeCallback(callback, { error: error.message });
+      callback({ error: error.message });
     }
   });
-  
+
+  // Handle assigning users to breakout rooms
   socket.on("assignToBreakoutRoom", async (data, callback) => {
     try {
       const { userId, breakoutRoomId, mainRoomId } = data;
-      const userEmail = socket.data.userEmail;
       
-      if (!isAdmin(userEmail)) {
-        safeCallback(callback, { error: "Unauthorized: Only admins can assign users to breakout rooms" });
+      // Check if user is admin
+      if (!isAdmin(socket.userEmail)) {
+        callback({ error: "Only admins can assign users to breakout rooms" });
         return;
       }
       
-      const breakoutRoomsForMain = breakoutRooms.get(mainRoomId) || [];
-      if (!breakoutRoomsForMain.includes(breakoutRoomId)) {
-        safeCallback(callback, { error: "Invalid breakout room for this main room" });
-        return;
-      }
+      console.log(`${LOG_PREFIX} Assigning user ${userId} to breakout room ${breakoutRoomId}`);
       
+      // Get the main room
       const mainRoom = rooms.get(mainRoomId);
       if (!mainRoom) {
-        safeCallback(callback, { error: "Main room not found" });
+        callback({ error: "Main room not found" });
         return;
       }
       
-      let userSocket = null;
-      let userName = "";
-      let userEmailToMove = "";
+      // Get the breakout room
+      const breakoutRoom = rooms.get(breakoutRoomId);
+      if (!breakoutRoom) {
+        callback({ error: "Breakout room not found" });
+        return;
+      }
       
-      for (const [socketId, peer] of mainRoom.peers.entries()) {
+      // Find the user's socket in the main room
+      let userSocket = null;
+      let userName = null;
+      
+      for (const [peerId, peer] of mainRoom.peers.entries()) {
         if (peer.userId === userId) {
-          const peerSocket = io.sockets.sockets.get(socketId);
-          if (peerSocket) {
-            userSocket = peerSocket;
-            userName = peer.userName;
-            userEmailToMove = peer.userEmail;
-            break;
-          }
+          userSocket = peer.socket;
+          userName = peer.userName;
+          break;
         }
       }
       
       if (!userSocket) {
-        safeCallback(callback, { error: "User not found in main room" });
+        callback({ error: "User not found in main room" });
         return;
       }
       
-      console.log(`${LOG_PREFIX} Admin ${userEmail} moving user ${userId} (${userName}) to breakout room ${breakoutRoomId}`);
-      
+      // Notify the user to move to the breakout room
       userSocket.emit("moveToBreakoutRoom", {
         breakoutRoomId,
         mainRoomId
       });
       
-      socket.to(mainRoomId).emit("userAssignedToBreakoutRoom", {
+      // Notify all users in the main room
+      io.to(mainRoomId).emit("userAssignedToBreakoutRoom", {
         userId,
         userName,
         breakoutRoomId
       });
       
-      safeCallback(callback, { success: true });
+      callback({ success: true });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error assigning user to breakout room:`, error);
-      safeCallback(callback, { error: error.message });
+      callback({ error: error.message });
     }
   });
-  
+
+  // Handle returning all users to main room
   socket.on("returnAllToMainRoom", async (data, callback) => {
     try {
       const { mainRoomId } = data;
-      const userEmail = socket.data.userEmail;
       
-      if (!isAdmin(userEmail)) {
-        safeCallback(callback, { error: "Unauthorized: Only admins can return users to main room" });
+      // Check if user is admin
+      if (!isAdmin(socket.userEmail)) {
+        callback({ error: "Only admins can return users to main room" });
         return;
       }
       
-      const breakoutRoomIds = breakoutRooms.get(mainRoomId) || [];
+      console.log(`${LOG_PREFIX} Returning all users to main room ${mainRoomId}`);
       
-      console.log(`${LOG_PREFIX} Admin ${userEmail} returning all users from ${breakoutRoomIds.length} breakout rooms to main room ${mainRoomId}`);
-      
-      for (const breakoutRoomId of breakoutRoomIds) {
-        io.to(breakoutRoomId).emit("returnToMainRoom", {
-          mainRoomId
-        });
-      }
-      
-      safeCallback(callback, { success: true });
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Error returning all users to main room:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-  
-  socket.on("checkAdminStatus", (data, callback) => {
-    try {
-      const userEmail = socket.data.userEmail || data.userEmail;
-      const isUserAdmin = isAdmin(userEmail);
-      
-      console.log(`${LOG_PREFIX} Checking admin status for ${userEmail}: ${isUserAdmin}`);
-      
-      safeCallback(callback, { isAdmin: isUserAdmin });
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Error checking admin status:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-  
-  socket.on("getBreakoutRooms", (data, callback) => {
-    try {
-      const { mainRoomId } = data;
-      const breakoutRoomIds = breakoutRooms.get(mainRoomId) || [];
-      
-      const formattedBreakoutRooms = breakoutRoomIds.map((id, index) => ({
-        id,
-        name: `Breakout Room ${index + 1}`
-      }));
-      
-      safeCallback(callback, { breakoutRooms: formattedBreakoutRooms });
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Error getting breakout rooms:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-  
-  socket.on("broadcastToBreakoutRooms", (data, callback) => {
-    try {
-      const { mainRoomId, message } = data;
-      const userEmail = socket.data.userEmail;
-      
-      if (!isAdmin(userEmail)) {
-        safeCallback(callback, { error: "Unauthorized: Only admins can broadcast to breakout rooms" });
+      // Get the main room
+      const mainRoom = rooms.get(mainRoomId);
+      if (!mainRoom) {
+        callback({ error: "Main room not found" });
         return;
       }
       
-      const breakoutRoomIds = breakoutRooms.get(mainRoomId) || [];
-      
-      console.log(`${LOG_PREFIX} Admin ${userEmail} broadcasting message to ${breakoutRoomIds.length} breakout rooms`);
-      
-      for (const breakoutRoomId of breakoutRoomIds) {
-        io.to(breakoutRoomId).emit("adminBroadcast", {
-          message,
-          fromAdmin: socket.data.userName
-        });
+      // Get all breakout rooms for this main room
+      const breakoutRoomIds = [];
+      for (const [roomId, room] of rooms.entries()) {
+        if (room.isBreakoutRoom && room.mainRoomId === mainRoomId) {
+          breakoutRoomIds.push(roomId);
+        }
       }
       
-      safeCallback(callback, { success: true });
+      // Notify all users in breakout rooms to return to main room
+      for (const breakoutRoomId of breakoutRoomIds) {
+        const breakoutRoom = rooms.get(breakoutRoomId);
+        if (breakoutRoom) {
+          for (const peer of breakoutRoom.peers.values()) {
+            peer.socket.emit("returnToMainRoom", { mainRoomId });
+          }
+        }
+      }
+      
+      callback({ success: true });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error broadcasting to breakout rooms:`, error);
-      safeCallback(callback, { error: error.message });
+      console.error(`${LOG_PREFIX} Error returning users to main room:`, error);
+      callback({ error: error.message });
     }
   });
 
   socket.on("getRouterRtpCapabilities", (data, callback) => {
-    const room = rooms.get(socket.data.roomName);
+    const room = rooms.get(socket.roomName);
     if (room) {
       const rtpCaps = (room.router &&
         typeof room.router.rtpCapabilities.toJSON === "function")
@@ -905,7 +863,7 @@ io.on("connection", (socket) => {
   // transport-connect: acknowledge connection
   socket.on("transport-connect", async (data, callback) => {
     try {
-      const room = rooms.get(socket.data.roomName);
+      const room = rooms.get(socket.roomName);
       if (!room) throw new Error("Room not found");
       const peer = room.peers.get(socket.id);
       if (!peer) throw new Error("Peer not found");
@@ -923,27 +881,27 @@ io.on("connection", (socket) => {
   // transport-produce: create a producer
   socket.on("transport-produce", async (data, callback) => {
     try {
-      const room = rooms.get(socket.data.roomName);
+      const room = rooms.get(socket.roomName);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room not found for user ${socket.data.userId}`);
+        console.error(`${LOG_PREFIX} Room not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        console.error(`${LOG_PREFIX} Peer not found for user ${socket.data.userId}`);
+        console.error(`${LOG_PREFIX} Peer not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       const transport = peer.transports[data.transportId];
       if (!transport) {
-        console.error(`${LOG_PREFIX} Transport not found for user ${socket.data.userId}`);
+        console.error(`${LOG_PREFIX} Transport not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Transport not found" });
         return;
       }
       
-      console.log(`${LOG_PREFIX} Creating producer for user ${socket.data.userId} with kind ${data.kind}`);
+      console.log(`${LOG_PREFIX} Creating producer for user ${socket.userId} with kind ${data.kind}`);
       
       const producer = await transport.produce({
         kind: data.kind,
@@ -952,12 +910,12 @@ io.on("connection", (socket) => {
       });
       
       peer.producers.set(producer.id, producer);
-      console.log(`${LOG_PREFIX} Producer created: ${producer.id} for user ${socket.data.userId}`);
+      console.log(`${LOG_PREFIX} Producer created: ${producer.id} for user ${socket.userId}`);
       
       // Notify other users about the new producer
-      socket.to(socket.data.roomName).emit("new-producer", {
+      socket.to(socket.roomName).emit("new-producer", {
         producerId: producer.id,
-        producerUserId: socket.data.userId,
+        producerUserId: socket.userId,
         kind: producer.kind
       });
       
@@ -971,7 +929,7 @@ io.on("connection", (socket) => {
   // transport-recv-connect: acknowledge consumer transport connection
   socket.on("transport-recv-connect", async (data, callback) => {
     try {
-      const room = rooms.get(socket.data.roomName);
+      const room = rooms.get(socket.roomName);
       if (!room) {
         safeCallback(callback, { error: "Room not found" });
         return;
@@ -988,7 +946,7 @@ io.on("connection", (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.data.userId}`);
+      console.log(`${LOG_PREFIX} Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.userId}`);
       await transport.connect({ dtlsParameters: data.dtlsParameters });
       safeCallback(callback);
     } catch (error) {
@@ -1000,7 +958,7 @@ io.on("connection", (socket) => {
   // consume: create a consumer for a remote producer
   socket.on("consume", async (data, callback) => {
     try {
-      const room = rooms.get(socket.data.roomName);
+      const room = rooms.get(socket.roomName);
       if (!room) {
         safeCallback(callback, { error: "Room not found" });
         return;
@@ -1017,7 +975,7 @@ io.on("connection", (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Creating consumer for producer ${data.remoteProducerId} for user ${socket.data.userId}`);
+      console.log(`${LOG_PREFIX} Creating consumer for producer ${data.remoteProducerId} for user ${socket.userId}`);
       
       const consumer = await consumerTransport.consume({
         producerId: data.remoteProducerId,
@@ -1025,7 +983,7 @@ io.on("connection", (socket) => {
       });
       
       peer.consumers.set(consumer.id, consumer);
-      console.log(`${LOG_PREFIX} Consumer created: ${consumer.id} for user ${socket.data.userId}`);
+      console.log(`${LOG_PREFIX} Consumer created: ${consumer.id} for user ${socket.userId}`);
       
       safeCallback(callback, {
         id: consumer.id,
@@ -1043,7 +1001,7 @@ io.on("connection", (socket) => {
   // consumer-resume: acknowledge resume
   socket.on("consumer-resume", async (data, callback) => {
     try {
-      const room = rooms.get(socket.data.roomName);
+      const room = rooms.get(socket.roomName);
       if (!room) {
         safeCallback(callback, { error: "Room not found" });
         return;
@@ -1077,11 +1035,11 @@ io.on("connection", (socket) => {
 // Helper: Handle Peer Leaving
 // ------------------------------
 function handleUserLeaving(socket) {
-  const roomName = socket.data.roomName;
+  const roomName = socket.roomName;
   if (!roomName) return;
   const room = rooms.get(roomName);
   if (!room) return;
-  socket.to(roomName).emit("userLeft", { userId: socket.data.userId });
+  socket.to(roomName).emit("userLeft", { userId: socket.userId });
   const peer = room.peers.get(socket.id);
   if (peer) {
     for (const key in peer.transports) {
@@ -1097,7 +1055,7 @@ function handleUserLeaving(socket) {
       } catch (e) {
         console.error(`${LOG_PREFIX} Error closing producer ${producer.id} for socket ${socket.id}:`, e);
       }
-      socket.to(roomName).emit("producerClosed", { remoteProducerId: producer.id, userId: socket.data.userId });
+      socket.to(roomName).emit("producerClosed", { remoteProducerId: producer.id, userId: socket.userId });
     });
     peer.consumers.forEach((consumer) => {
       try {
@@ -1109,13 +1067,13 @@ function handleUserLeaving(socket) {
   }
   room.peers.delete(socket.id);
   socket.leave(roomName);
-  console.log(`${LOG_PREFIX} User ${socket.data.userId} left room ${roomName}`);
+  console.log(`${LOG_PREFIX} User ${socket.userId} left room ${roomName}`);
   
   // If this is a breakout room and it's now empty, notify the main room
-  if (socket.data.isInBreakoutRoom && socket.data.mainRoomId && room.peers.size === 0) {
-    const mainRoom = rooms.get(socket.data.mainRoomId);
+  if (socket.isBreakoutRoom && socket.mainRoomId && room.peers.size === 0) {
+    const mainRoom = rooms.get(socket.mainRoomId);
     if (mainRoom) {
-      io.to(socket.data.mainRoomId).emit("breakoutRoomEmpty", {
+      io.to(socket.mainRoomId).emit("breakoutRoomEmpty", {
         breakoutRoomId: roomName
       });
     }
