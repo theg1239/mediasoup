@@ -44,6 +44,7 @@ const corsOptions = {
     const allowedOrigins = [
       "http://localhost:3000",
       "https://acm.today",
+      "https://enrollments-25.vercel.app",
       process.env.FRONTEND_URL || "*"
     ];
     if (!origin) {
@@ -127,7 +128,7 @@ app.get("/", (req, res) => {
 const server = https.createServer(sslOptions, app);
 const io = socketIo(server, {
   cors: {
-    origin: ["http://localhost:3000", "https://acm.today", process.env.FRONTEND_URL || "*"],
+    origin: ["http://localhost:3000", "https://acm.today", "https://enrollments-25.vercel.app", process.env.FRONTEND_URL || "*"],
     methods: ["GET", "POST"],
     credentials: true
   },
