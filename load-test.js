@@ -5,11 +5,11 @@ const cluster = require('cluster');
 const numCPUs = os.cpus().length;
 
 const SERVER_URL = process.env.SERVER_URL || 'https://acm.today';
-const ROOM_COUNT = 15;
-const USERS_PER_ROOM = 20;
+const ROOM_COUNT = 50;
+const USERS_PER_ROOM = 50;
 const TOTAL_CONNECTIONS = ROOM_COUNT * USERS_PER_ROOM;
-const CONNECTION_DELAY_MS = 50;
-const TEST_DURATION_MS = 5 * 60 * 1000;
+const CONNECTION_DELAY_MS = 5;
+const TEST_DURATION_MS = 10 * 60 * 1000; 
 const STATS_INTERVAL_MS = 5000;
 
 let connectedCount = 0;
@@ -17,7 +17,6 @@ let disconnectedCount = 0;
 let failedCount = 0;
 let messagesSent = 0;
 let messagesReceived = 0;
-let roomsCreated = 0;
 let startTime = null;
 let connections = [];
 let rooms = [];
@@ -25,10 +24,6 @@ let rooms = [];
 for (let i = 0; i < ROOM_COUNT; i++) {
   rooms.push(`test-room-${i}-${uuidv4().substring(0, 8)}`);
 }
-
-const latencies = [];
-const cpuUsage = [];
-const memoryUsage = [];
 
 if (cluster.isPrimary) {
   console.log(`Primary process ${process.pid} is running`);
@@ -103,7 +98,6 @@ if (cluster.isPrimary) {
   
 } else {
   console.log(`Worker ${process.pid} started`);
-  // Worker-specific variables
   let startIdx, endIdx, workerRooms;
   let connections = [];
 
@@ -177,11 +171,8 @@ if (cluster.isPrimary) {
       
       connections[index] = socket;
       
-      // Connection events
       socket.on('connect', () => {
         connectedCount++;
-        
-        // Join room
         socket.emit('joinRoom', {
           roomName: roomId,
           userId: userId,
@@ -189,10 +180,7 @@ if (cluster.isPrimary) {
           userEmail: `${userId}@test.com`
         }, (response) => {
           if (response && response.rtpCapabilities) {
-            // Successfully joined room
             socket.emit('deviceReady');
-            
-            // Simulate some activity
             simulateActivity(socket, roomId, userId);
           }
         });
@@ -212,19 +200,15 @@ if (cluster.isPrimary) {
       });
       
       socket.on('userJoined', () => {
-        // Another user joined
       });
       
       socket.on('userLeft', () => {
-        // Another user left
       });
       
       socket.on('new-producer', () => {
-        // New producer available
       });
       
       socket.on('producer-closed', () => {
-        // Producer closed
       });
       
     } catch (error) {
@@ -245,9 +229,8 @@ if (cluster.isPrimary) {
       } else {
         clearInterval(chatInterval);
       }
-    }, 30000 + Math.random() * 60000);
+    }, 15000 + Math.random() * 15000);
     
-    // Toggle media state periodically
     const mediaInterval = setInterval(() => {
       if (socket.connected) {
         socket.emit('mediaStateChanged', {
@@ -258,23 +241,6 @@ if (cluster.isPrimary) {
       } else {
         clearInterval(mediaInterval);
       }
-    }, 45000 + Math.random() * 90000);
-  }
-  
-  function logStats(connected, disconnected, failed, sent, received) {
-    const elapsedSeconds = (Date.now() - startTime) / 1000;
-    const memUsage = process.memoryUsage();
-    
-    console.log('\n--- Load Test Stats ---');
-    console.log(`Time elapsed: ${Math.floor(elapsedSeconds / 60)}m ${Math.floor(elapsedSeconds % 60)}s`);
-    console.log(`Connected: ${connected} | Disconnected: ${disconnected} | Failed: ${failed}`);
-    console.log(`Messages sent: ${sent} | Messages received: ${received}`);
-    console.log(`Memory usage: ${Math.round(memUsage.rss / 1024 / 1024)}MB RSS, ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB Heap`);
-    
-    const successRate = (connected / (connected + failed)) * 100;
-    console.log(`Connection success rate: ${successRate.toFixed(2)}%`);
-    
-    const deliveryRate = received > 0 ? (received / sent) * 100 : 0;
-    console.log(`Message delivery rate: ${deliveryRate.toFixed(2)}%`);
+    }, 30000 + Math.random() * 30000);
   }
 }
