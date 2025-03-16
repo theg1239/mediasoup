@@ -248,6 +248,19 @@ const breakoutRooms = new Map(); // Maps main room ID to array of breakout room 
 const breakoutToMainRoom = new Map(); // Maps breakout room ID to main room ID
 const adminUsers = new Map(); // Maps user email to boolean (true if admin)
 
+// Helper function to safely execute callbacks
+function safeCallback(callback, data = {}) {
+  if (typeof callback === 'function') {
+    try {
+      callback(data);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error in callback execution:`, error);
+    }
+  } else {
+    console.warn(`${LOG_PREFIX} Callback is not a function`);
+  }
+}
+
 // Helper function to check if a user is an admin
 function isAdmin(userEmail, socket) {
   // If socket is provided and has isAdmin flag set, use that
@@ -1119,6 +1132,47 @@ io.on("connection", async (socket) => {
     }
   });
 
+  socket.on("createWebRtcTransport", async (data, callback) => {
+    try {
+      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}`);
+      
+      const room = rooms.get(socket.roomName);
+      if (!room) {
+        console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.roomName}`);
+        safeCallback(callback, { error: "Room not found" });
+        return;
+      }
+      
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        console.error(`${LOG_PREFIX} Peer not found for transport creation: ${socket.id}`);
+        safeCallback(callback, { error: "Peer not found" });
+        return;
+      }
+      
+      console.log(`${LOG_PREFIX} Creating WebRTC transport with router ${room.router.id}`);
+      const { transport, params } = await createWebRtcTransport(room.router);
+      
+      peer.transports[transport.id] = transport;
+      
+      transport.on("close", () => {
+        console.log(`${LOG_PREFIX} Transport ${transport.id} closed`);
+        delete peer.transports[transport.id];
+      });
+      
+      console.log(`${LOG_PREFIX} WebRTC transport created successfully: ${transport.id}`);
+      socket.emit("webrtc-transport-created", {
+        transportId: transport.id,
+        type: data.consumer ? "consumer" : "producer"
+      });
+      
+      safeCallback(callback, { params });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+      safeCallback(callback, { error: error.message });
+    }
+  });
+
   // transport-connect: acknowledge connection
   socket.on("transport-connect", async (data, callback) => {
     try {
@@ -1181,6 +1235,34 @@ io.on("connection", async (socket) => {
       safeCallback(callback, { id: producer.id });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating producer:`, error);
+      safeCallback(callback, { error: error.message });
+    }
+  });
+
+  socket.on("deviceReady", async (data, callback) => {
+    try {
+      console.log(`${LOG_PREFIX} Device ready for user ${socket.userId}`);
+      
+      const room = rooms.get(socket.roomName);
+      if (!room) {
+        console.error(`${LOG_PREFIX} Room not found for deviceReady: ${socket.roomName}`);
+        safeCallback(callback, { error: "Room not found" });
+        return;
+      }
+      
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        console.error(`${LOG_PREFIX} Peer not found for deviceReady: ${socket.id}`);
+        safeCallback(callback, { error: "Peer not found" });
+        return;
+      }
+      
+      peer.deviceLoaded = true;
+      console.log(`${LOG_PREFIX} Device marked as loaded for user ${socket.userId}`);
+      
+      safeCallback(callback, { success: true });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error handling deviceReady:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1690,16 +1772,6 @@ app.use((req, res, next) => {
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
   next();
 });
-
-function safeCallback(callback, data) {
-  if (typeof callback === 'function') {
-    try {
-      callback(data);
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Error in callback:`, error);
-    }
-  }
-}
 
 function handleDashboardConnection(socket, authData) {
   const { email, secret, token } = authData;
