@@ -43,6 +43,7 @@ const corsOptions = {
     console.log(`${LOG_PREFIX} CORS check for origin: ${origin}`);
     const allowedOrigins = [
       "http://localhost:3000",
+      "https://acm.today",
       process.env.FRONTEND_URL || "*"
     ];
     if (!origin) {
@@ -125,7 +126,11 @@ app.get("/", (req, res) => {
 // ------------------------------
 const server = https.createServer(sslOptions, app);
 const io = socketIo(server, {
-  cors: corsOptions,
+  cors: {
+    origin: ["http://localhost:3000", "https://acm.today", process.env.FRONTEND_URL || "*"],
+    methods: ["GET", "POST"],
+    credentials: true
+  },
   pingTimeout: 60000,
   pingInterval: 25000,
   transports: ["websocket", "polling"],
