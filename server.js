@@ -16,6 +16,14 @@ require("dotenv").config();
 const app = express();
 const LOG_PREFIX = "[MediasoupServer]";
 
+// Add timestamp to logs
+const log = {
+  info: (message, ...args) => console.log(`${LOG_PREFIX} [${new Date().toISOString()}] ${message}`, ...args),
+  warn: (message, ...args) => console.warn(`${LOG_PREFIX} [${new Date().toISOString()}] ${message}`, ...args),
+  error: (message, ...args) => console.error(`${LOG_PREFIX} [${new Date().toISOString()}] ${message}`, ...args),
+  debug: (message, ...args) => console.debug(`${LOG_PREFIX} [${new Date().toISOString()}] ${message}`, ...args)
+};
+
 app.use(express.json());
 app.use(cookieParser());
 
@@ -94,7 +102,7 @@ app.post("/admin/toggle-kill-switch", (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  console.log(`${LOG_PREFIX} Health check requested`);
+  log.info(`Health check requested from ${req.ip}`);
   res.status(200).json({ 
     status: "ok", 
     uptime: process.uptime(),
@@ -110,7 +118,7 @@ app.get("/dashboard", (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  console.log(`${LOG_PREFIX} Root endpoint requested from ${req.ip}`);
+  log.info(`Root endpoint requested from ${req.ip}`);
   res.send(`
     <h1>MediaSoup WebRTC Server</h1>
     <p>Server is running</p>
@@ -150,6 +158,7 @@ const io = socketIo(server, {
 });
 
 console.log(`${LOG_PREFIX} HTTPS and Socket.IO server initialized`);
+log.info(`HTTPS and Socket.IO server initialized`);
 
 // ------------------------------
 // Helper: Get Listen IPs for mediasoup
@@ -162,6 +171,7 @@ function getListenIps() {
   const listenIps = [];
   const publicIp = process.env.ANNOUNCED_IP || null;
   
+  // Always add 0.0.0.0 with the announced IP
   listenIps.push({ 
     ip: "0.0.0.0", 
     announcedIp: publicIp 
@@ -173,9 +183,11 @@ function getListenIps() {
   if (!publicIp) {
     console.warn(`${LOG_PREFIX} WARNING: No ANNOUNCED_IP set. Remote clients may have connectivity issues.`);
     
+    // Try to find a non-internal IP to use as fallback
     let fallbackIp = null;
     
     try {
+      // Look for a public-facing IP
       Object.keys(interfaces).forEach((interfaceName) => {
         const networkInterface = interfaces[interfaceName];
         if (networkInterface) {
@@ -189,6 +201,7 @@ function getListenIps() {
         }
       });
       
+      // If we found a fallback IP, add it as an option
       if (fallbackIp && fallbackIp !== '127.0.0.1') {
         listenIps.push({ 
           ip: fallbackIp, 
@@ -201,6 +214,7 @@ function getListenIps() {
     }
   }
   
+  // Ensure we have at least one valid listen IP
   if (listenIps.length === 0) {
     console.error(`${LOG_PREFIX} No valid listen IPs found, using 127.0.0.1 as fallback`);
     listenIps.push({ 
@@ -520,36 +534,37 @@ async function createWebRtcTransport(router) {
     router.createWebRtcTransport(transportOptions)
       .then(async (transport) => {
         clearTimeout(timeout);
-        console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.id}`);
+        log.info(`WebRTC transport created: ${transport.id} for user ${socket.userName || 'unknown'} in room ${socket.roomName || 'unknown'}`);
         
         if (maxIncomingBitrate) {
           try {
             await transport.setMaxIncomingBitrate(maxIncomingBitrate);
-            console.log(`${LOG_PREFIX} Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
+            log.info(`Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
           } catch (bitrateError) {
-            console.warn(`${LOG_PREFIX} Error setting max incoming bitrate: ${bitrateError.message}`);
+            log.warn(`Error setting max incoming bitrate: ${bitrateError.message}`);
+            // Continue despite bitrate setting error
           }
         }
         
         transport.on("routerclose", () =>
-          console.log(`${LOG_PREFIX} Transport ${transport.id} closed (router closed)`)
+          log.info(`Transport ${transport.id} closed (router closed)`)
         );
         
         transport.on("icestatechange", (state) => {
-          console.log(`${LOG_PREFIX} Transport ${transport.id} ICE state: ${state}`);
+          log.info(`Transport ${transport.id} ICE state changed to: ${state} for user ${socket.userName || 'unknown'}`);
           if (state === "failed") {
             transport.restartIce()
-              .then(() => console.log(`${LOG_PREFIX} ICE restarted for ${transport.id}`))
-              .catch((error) => console.error(`${LOG_PREFIX} ICE restart error for ${transport.id}:`, error));
+              .then(() => log.info(`ICE restarted for transport ${transport.id}`))
+              .catch((error) => log.error(`ICE restart error for transport ${transport.id}:`, error));
           }
         });
         
         transport.on("dtlsstatechange", (state) => {
-          console.log(`${LOG_PREFIX} Transport ${transport.id} DTLS state: ${state}`);
+          log.info(`Transport ${transport.id} DTLS state: ${state}`);
         });
         
         transport.on("sctpstatechange", (state) => {
-          console.log(`${LOG_PREFIX} Transport ${transport.id} SCTP state: ${state}`);
+          log.info(`Transport ${transport.id} SCTP state: ${state}`);
         });
         
         const params = {
@@ -560,7 +575,7 @@ async function createWebRtcTransport(router) {
           sctpParameters: transport.sctpParameters
         };
         
-        console.log(`${LOG_PREFIX} Transport params ready: ${transport.id}`);
+        log.info(`Transport params ready: ${transport.id}`);
         
         resolve({
           transport,
@@ -569,8 +584,8 @@ async function createWebRtcTransport(router) {
       })
       .catch((error) => {
         clearTimeout(timeout);
-        console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
-        console.error(`${LOG_PREFIX} Transport options used:`, JSON.stringify({
+        log.error(`Error creating WebRTC transport:`, error);
+        log.error(`Transport options used:`, JSON.stringify({
           listenIps: transportOptions.listenIps,
           enableUdp: transportOptions.enableUdp,
           enableTcp: transportOptions.enableTcp
@@ -651,7 +666,7 @@ app.post("/api/rooms/:roomId/close", requireAuth, (req, res) => {
       res.status(200).json({ status: "success" });
     })
     .catch(err => {
-      console.error(`${LOG_PREFIX} Error closing room:`, err);
+      log.error(`Error closing room:`, err);
       res.status(500).json({ error: "Failed to close room" });
     });
 });
@@ -768,7 +783,10 @@ function getBreakoutRoomsData() {
 // Socket & Room Management
 // ------------------------------
 io.on("connection", async (socket) => {
-  console.log(`${LOG_PREFIX} New socket connection: ${socket.id}`);
+  log.info(`New socket connection: ${socket.id} from ${socket.handshake.address}`);
+  
+  // Track connection time for debugging
+  socket.connectionTime = Date.now();
   
   // Handle dashboard authentication
   const authData = socket.handshake.auth || {};
@@ -784,11 +802,13 @@ io.on("connection", async (socket) => {
   // Handle user joining a room
   socket.on("joinRoom", async (data, callback) => {
     try {
-      const { roomName, userId, userName, userEmail, mainRoomId } = data;
-      console.log(`${LOG_PREFIX} User ${userName} (${userId}) joining room ${roomName}`);
+      const { roomName, userId, userName, userEmail, isBreakoutRoom = false, mainRoomId = null } = data;
       
-      // Check if this is a breakout room join
-      const isBreakoutRoom = mainRoomId ? true : false;
+      log.info(`User ${userName} (${userId}) joining room ${roomName}`, {
+        socketId: socket.id,
+        isBreakoutRoom,
+        mainRoomId
+      });
       
       // Get or create the room
       const room = await getOrCreateRoom(roomName);
@@ -799,7 +819,7 @@ io.on("connection", async (socket) => {
       
       // Check if user is already in the room
       if (room.peers.has(socket.id)) {
-        console.log(`${LOG_PREFIX} User ${userName} (${userId}) already in room ${roomName}`);
+        log.info(`User ${userName} (${userId}) already in room ${roomName}`);
         // Just update the callback with current state
         safeCallback(callback, {
           rtpCapabilities: room.router.rtpCapabilities,
@@ -862,10 +882,10 @@ io.on("connection", async (socket) => {
         chatHistory: room.chatHistory || []
       });
       
-      console.log(`${LOG_PREFIX} User ${userName} (${userId}) joined room ${roomName}`);
+      log.info(`User ${userName} (${userId}) joined room ${roomName}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error joining room:`, error);
-      safeCallback(callback, { error: error.message });
+      log.error(`Error joining room:`, error);
+      safeCallback(callback, { error: error.message || "Internal server error" });
     }
   });
 
@@ -873,7 +893,7 @@ io.on("connection", async (socket) => {
   socket.on("leaveRoom", async (data) => {
     try {
       const { roomName, userId, isMovingToBreakoutRoom, isReturningToMainRoom } = data;
-      console.log(`${LOG_PREFIX} User ${socket.userName} (${userId}) leaving room ${roomName}`);
+      log.info(`User ${socket.userName} (${userId}) leaving room ${roomName}`);
       
       // Special handling for breakout room transitions
       const isTransitioning = isMovingToBreakoutRoom || isReturningToMainRoom;
@@ -881,14 +901,14 @@ io.on("connection", async (socket) => {
       // Get the room
       const room = rooms.get(roomName);
       if (!room) {
-        console.log(`${LOG_PREFIX} Room ${roomName} not found for user leaving`);
+        log.info(`Room ${roomName} not found for user leaving`);
         return;
       }
       
       // Get the peer
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        console.log(`${LOG_PREFIX} Peer not found in room ${roomName}`);
+        log.info(`Peer not found in room ${roomName}`);
         return;
       }
 
@@ -897,7 +917,7 @@ io.on("connection", async (socket) => {
         try {
           transport.close();
         } catch (error) {
-          console.error(`${LOG_PREFIX} Error closing transport:`, error);
+          log.error(`Error closing transport:`, error);
         }
       }
       
@@ -925,9 +945,9 @@ io.on("connection", async (socket) => {
         }
       }
       
-      console.log(`${LOG_PREFIX} User ${socket.userName} (${userId}) left room ${roomName}`);
+      log.info(`User ${socket.userName} (${userId}) left room ${roomName}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error leaving room:`, error);
+      log.error(`Error leaving room:`, error);
     }
   });
 
@@ -938,16 +958,16 @@ io.on("connection", async (socket) => {
       const roomName = socket.roomName;
       
       if (!roomName) {
-        console.error(`${LOG_PREFIX} No room found for screen share start`);
+        log.error(`No room found for screen share start`);
         return;
       }
       
-      console.log(`${LOG_PREFIX} User ${userName} (${userId}) started screen sharing in room ${roomName}`);
+      log.info(`User ${userName} (${userId}) started screen sharing in room ${roomName}`);
       
       // Broadcast to all users in the room except the sender
       socket.to(roomName).emit("screenShareStarted", { userId, userName, hasCamera });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling screen share start:`, error);
+      log.error(`Error handling screen share start:`, error);
     }
   });
 
@@ -957,16 +977,16 @@ io.on("connection", async (socket) => {
       const roomName = socket.roomName;
       
       if (!roomName) {
-        console.error(`${LOG_PREFIX} No room found for screen share stop`);
+        log.error(`No room found for screen share stop`);
         return;
       }
       
-      console.log(`${LOG_PREFIX} User ${socket.userName} (${userId}) stopped screen sharing in room ${roomName}`);
+      log.info(`User ${socket.userName} (${userId}) stopped screen sharing in room ${roomName}`);
       
       // Broadcast to all users in the room except the sender
       socket.to(roomName).emit("screenShareStopped", { userId });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling screen share stop:`, error);
+      log.error(`Error handling screen share stop:`, error);
     }
   });
 
@@ -976,16 +996,16 @@ io.on("connection", async (socket) => {
       const { roomId, userId, userName, message, timestamp } = data;
       
       if (!roomId) {
-        console.error(`${LOG_PREFIX} No room ID provided for chat message`);
+        log.error(`No room ID provided for chat message`);
         return;
       }
       
-      console.log(`${LOG_PREFIX} Chat message from ${userName} (${userId}) in room ${roomId}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+      log.info(`Chat message from ${userName} (${userId}) in room ${roomId}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
       
       // Add the message to the room's chat history if needed
       const room = rooms.get(roomId);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room ${roomId} not found for chat message`);
+        log.error(`Room ${roomId} not found for chat message`);
         return;
       }
       
@@ -1004,7 +1024,7 @@ io.on("connection", async (socket) => {
       // Broadcast to all users in the room (including sender for consistency)
       io.to(roomId).emit("chatMessage", chatMessage);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling chat message:`, error);
+      log.error(`Error handling chat message:`, error);
     }
   });
 
@@ -1014,15 +1034,15 @@ io.on("connection", async (socket) => {
       const { roomId } = data;
       
       if (!roomId) {
-        console.error(`${LOG_PREFIX} No room ID provided for getRoomUsers`);
+        log.error(`No room ID provided for getRoomUsers`);
         return;
       }
       
-      console.log(`${LOG_PREFIX} Getting users for room ${roomId}`);
+      log.info(`Getting users for room ${roomId}`);
       
       const room = rooms.get(roomId);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room ${roomId} not found for getRoomUsers`);
+        log.error(`Room ${roomId} not found for getRoomUsers`);
         return;
       }
       
@@ -1039,9 +1059,9 @@ io.on("connection", async (socket) => {
       // Send to the requesting client
       socket.emit("roomUsers", users);
       
-      console.log(`${LOG_PREFIX} Sent ${users.length} users for room ${roomId}`);
+      log.info(`Sent ${users.length} users for room ${roomId}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling getRoomUsers:`, error);
+      log.error(`Error handling getRoomUsers:`, error);
     }
   });
 
@@ -1056,7 +1076,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Creating ${count} breakout rooms for main room ${mainRoomId}`);
+      log.info(`Creating ${count} breakout rooms for main room ${mainRoomId}`);
       
       // Get the main room
       const mainRoom = rooms.get(mainRoomId);
@@ -1095,7 +1115,7 @@ io.on("connection", async (socket) => {
       
       callback({ success: true, breakoutRooms });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error creating breakout rooms:`, error);
+      log.error(`Error creating breakout rooms:`, error);
       callback({ error: error.message });
     }
   });
@@ -1111,7 +1131,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Assigning user ${userId} to breakout room ${breakoutRoomId}`);
+      log.info(`Assigning user ${userId} to breakout room ${breakoutRoomId}`);
       
       // Get the main room
       const mainRoom = rooms.get(mainRoomId);
@@ -1159,7 +1179,7 @@ io.on("connection", async (socket) => {
       
       callback({ success: true });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error assigning user to breakout room:`, error);
+      log.error(`Error assigning user to breakout room:`, error);
       callback({ error: error.message });
     }
   });
@@ -1175,7 +1195,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Returning all users to main room ${mainRoomId}`);
+      log.info(`Returning all users to main room ${mainRoomId}`);
       
       // Get the main room
       const mainRoom = rooms.get(mainRoomId);
@@ -1204,7 +1224,7 @@ io.on("connection", async (socket) => {
       
       callback({ success: true });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error returning users to main room:`, error);
+      log.error(`Error returning users to main room:`, error);
       callback({ error: error.message });
     }
   });
@@ -1225,54 +1245,58 @@ io.on("connection", async (socket) => {
   // Handle createWebRtcTransport request
   socket.on("createWebRtcTransport", async (data, callback) => {
     try {
-      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}, socketId: ${socket.id}`);
-      console.log(`${LOG_PREFIX} Socket state: connected=${socket.connected}, roomName=${socket.roomName}`);
+      log.info(`Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}, socketId: ${socket.id}`);
+      log.info(`Socket state: connected=${socket.connected}, roomName=${socket.roomName}`);
       
       // Validate room and peer
       const room = rooms.get(socket.roomName);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.roomName}`);
-        console.error(`${LOG_PREFIX} Available rooms: ${Array.from(rooms.keys()).join(', ')}`);
+        log.error(`Room not found for transport creation: ${socket.roomName}`);
+        log.error(`Available rooms: ${Array.from(rooms.keys()).join(', ')}`);
         safeCallback(callback, { error: "Room not found" });
         return;
       }
       
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        console.error(`${LOG_PREFIX} Peer not found for transport creation: ${socket.id}`);
-        console.error(`${LOG_PREFIX} Available peers in room: ${Array.from(room.peers.keys()).join(', ')}`);
+        log.error(`Peer not found for transport creation: ${socket.id}`);
+        log.error(`Available peers in room: ${Array.from(room.peers.keys()).join(', ')}`);
         safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       // Create the WebRTC transport
-      console.log(`${LOG_PREFIX} Creating WebRTC transport with router ${room.router.id}`);
+      log.info(`Creating WebRTC transport with router ${room.router.id}`);
       
       try {
         const { transport, params } = await createWebRtcTransport(room.router);
         
+        // Store the transport
         peer.transports[transport.id] = transport;
         
+        // Handle transport closure
         transport.on("close", () => {
-          console.log(`${LOG_PREFIX} Transport ${transport.id} closed`);
+          log.info(`Transport ${transport.id} closed`);
           delete peer.transports[transport.id];
         });
         
-        console.log(`${LOG_PREFIX} WebRTC transport created successfully: ${transport.id}`);
+        // Notify client about transport creation
+        log.info(`WebRTC transport created successfully: ${transport.id}`);
         socket.emit("webrtc-transport-created", {
           transportId: transport.id,
           type: data.consumer ? "consumer" : "producer"
         });
         
-        console.log(`${LOG_PREFIX} Sending transport params back to client: ${JSON.stringify(params.id)}`);
+        // Return transport parameters to client
+        log.info(`Sending transport params back to client: ${JSON.stringify(params.id)}`);
         safeCallback(callback, { params });
       } catch (transportError) {
-        console.error(`${LOG_PREFIX} Error in createWebRtcTransport function:`, transportError);
-        console.error(`${LOG_PREFIX} Router state: id=${room.router.id}, closed=${room.router.closed}`);
+        log.error(`Error in createWebRtcTransport function:`, transportError);
+        log.error(`Router state: id=${room.router.id}, closed=${room.router.closed}`);
         safeCallback(callback, { error: `Transport creation error: ${transportError.message}` });
       }
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+      log.error(`Error creating WebRTC transport:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1300,25 +1324,25 @@ io.on("connection", async (socket) => {
     try {
       const room = rooms.get(socket.roomName);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room not found for user ${socket.userId}`);
+        log.error(`Room not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Room not found" });
         return;
       }
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        console.error(`${LOG_PREFIX} Peer not found for user ${socket.userId}`);
+        log.error(`Peer not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       const transport = peer.transports[data.transportId];
       if (!transport) {
-        console.error(`${LOG_PREFIX} Transport not found for user ${socket.userId}`);
+        log.error(`Transport not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Transport not found" });
         return;
       }
       
-      console.log(`${LOG_PREFIX} Creating producer for user ${socket.userId} with kind ${data.kind}`);
+      log.info(`Creating producer for user ${socket.userId} with kind ${data.kind}`);
       
       const producer = await transport.produce({
         kind: data.kind,
@@ -1327,18 +1351,26 @@ io.on("connection", async (socket) => {
       });
       
       peer.producers.set(producer.id, producer);
-      console.log(`${LOG_PREFIX} Producer created: ${producer.id} for user ${socket.userId}`);
+      log.info(`Producer created: ${producer.id} for user ${socket.userId}`);
+      
+      // Handle producer closure
+      producer.on("transportclose", () => {
+        log.info(`Producer ${producer.id} closed due to transport closure`);
+        producer.close();
+        peer.producers.delete(producer.id);
+      });
       
       // Notify other users about the new producer
-      socket.to(socket.roomName).emit("new-producer", {
+      socket.to(socket.roomName).emit("newProducer", {
         producerId: producer.id,
-        producerUserId: socket.userId,
-        kind: producer.kind
+        userId: socket.userId,
+        userName: socket.userName,
+        kind
       });
       
       safeCallback(callback, { id: producer.id });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error creating producer:`, error);
+      log.error(`Error creating producer:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1346,30 +1378,30 @@ io.on("connection", async (socket) => {
   // Handle deviceReady event - client is ready to receive consumers
   socket.on("deviceReady", async (data, callback) => {
     try {
-      console.log(`${LOG_PREFIX} Device ready for user ${socket.userId}`);
+      log.info(`Device ready for user ${socket.userId}`);
       
       const room = rooms.get(socket.roomName);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room not found for deviceReady: ${socket.roomName}`);
+        log.error(`Room not found for deviceReady: ${socket.roomName}`);
         safeCallback(callback, { error: "Room not found" });
         return;
       }
       
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        console.error(`${LOG_PREFIX} Peer not found for deviceReady: ${socket.id}`);
+        log.error(`Peer not found for deviceReady: ${socket.id}`);
         safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       // Mark the peer's device as loaded
       peer.deviceLoaded = true;
-      console.log(`${LOG_PREFIX} Device marked as loaded for user ${socket.userId}`);
+      log.info(`Device marked as loaded for user ${socket.userId}`);
       
       // Notify the client that we've received their deviceReady event
       safeCallback(callback, { success: true });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling deviceReady:`, error);
+      log.error(`Error handling deviceReady:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1394,11 +1426,11 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.userId}`);
+      log.info(`Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.userId}`);
       await transport.connect({ dtlsParameters: data.dtlsParameters });
       safeCallback(callback);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error connecting consumer transport:`, error);
+      log.error(`Error connecting consumer transport:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1423,7 +1455,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Creating consumer for producer ${data.remoteProducerId} for user ${socket.userId}`);
+      log.info(`Creating consumer for producer ${data.remoteProducerId} for user ${socket.userId}`);
       
       const consumer = await consumerTransport.consume({
         producerId: data.remoteProducerId,
@@ -1431,7 +1463,7 @@ io.on("connection", async (socket) => {
       });
       
       peer.consumers.set(consumer.id, consumer);
-      console.log(`${LOG_PREFIX} Consumer created: ${consumer.id} for user ${socket.userId}`);
+      log.info(`Consumer created: ${consumer.id} for user ${socket.userId}`);
       
       safeCallback(callback, {
         id: consumer.id,
@@ -1441,7 +1473,7 @@ io.on("connection", async (socket) => {
         serverConsumerId: consumer.id
       });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error creating consumer:`, error);
+      log.error(`Error creating consumer:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1484,7 +1516,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Getting participants for breakout room ${breakoutRoomId}`);
+      log.info(`Getting participants for breakout room ${breakoutRoomId}`);
       
       // Get the breakout room
       const breakoutRoom = rooms.get(breakoutRoomId);
@@ -1505,9 +1537,9 @@ io.on("connection", async (socket) => {
       
       callback({ participants });
       
-      console.log(`${LOG_PREFIX} Sent ${participants.length} participants for breakout room ${breakoutRoomId}`);
+      log.info(`Sent ${participants.length} participants for breakout room ${breakoutRoomId}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling getBreakoutRoomParticipants:`, error);
+      log.error(`Error handling getBreakoutRoomParticipants:`, error);
       callback({ error: "Internal server error" });
     }
   });
@@ -1523,7 +1555,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Closing breakout room ${breakoutRoomId}`);
+      log.info(`Closing breakout room ${breakoutRoomId}`);
       
       // Get the breakout room
       const breakoutRoom = rooms.get(breakoutRoomId);
@@ -1552,9 +1584,9 @@ io.on("connection", async (socket) => {
       
       callback({ success: true });
       
-      console.log(`${LOG_PREFIX} Closed breakout room ${breakoutRoomId}`);
+      log.info(`Closed breakout room ${breakoutRoomId}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling closeBreakoutRoom:`, error);
+      log.error(`Error handling closeBreakoutRoom:`, error);
       callback({ error: "Internal server error" });
     }
   });
@@ -1570,7 +1602,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Sending message to breakout room ${breakoutRoomId}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+      log.info(`Sending message to breakout room ${breakoutRoomId}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
       
       // Get the breakout room
       const breakoutRoom = rooms.get(breakoutRoomId);
@@ -1584,9 +1616,9 @@ io.on("connection", async (socket) => {
       
       callback({ success: true });
       
-      console.log(`${LOG_PREFIX} Sent message to breakout room ${breakoutRoomId}`);
+      log.info(`Sent message to breakout room ${breakoutRoomId}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling messageBreakoutRoom:`, error);
+      log.error(`Error handling messageBreakoutRoom:`, error);
       callback({ error: "Internal server error" });
     }
   });
@@ -1602,7 +1634,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Returning participant ${participantId} from breakout room ${breakoutRoomId} to main room ${mainRoomId}`);
+      log.info(`Returning participant ${participantId} from breakout room ${breakoutRoomId} to main room ${mainRoomId}`);
       
       // Get the breakout room
       const breakoutRoom = rooms.get(breakoutRoomId);
@@ -1637,9 +1669,9 @@ io.on("connection", async (socket) => {
       
       callback({ success: true });
       
-      console.log(`${LOG_PREFIX} Returned participant ${participantId} to main room ${mainRoomId}`);
+      log.info(`Returned participant ${participantId} to main room ${mainRoomId}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling returnParticipantToMainRoom:`, error);
+      log.error(`Error handling returnParticipantToMainRoom:`, error);
       callback({ error: "Internal server error" });
     }
   });
@@ -1655,7 +1687,7 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      console.log(`${LOG_PREFIX} Moving participant ${participantId} from breakout room ${fromBreakoutRoomId} to ${toBreakoutRoomId}`);
+      log.info(`Moving participant ${participantId} from breakout room ${fromBreakoutRoomId} to ${toBreakoutRoomId}`);
       
       // Get the source breakout room
       const fromRoom = rooms.get(fromBreakoutRoomId);
@@ -1695,15 +1727,20 @@ io.on("connection", async (socket) => {
       
       callback({ success: true });
       
-      console.log(`${LOG_PREFIX} Moved participant ${participantId} from breakout room ${fromBreakoutRoomId} to ${toBreakoutRoomId}`);
+      log.info(`Moved participant ${participantId} from breakout room ${fromBreakoutRoomId} to ${toBreakoutRoomId}`);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error handling moveParticipantToBreakoutRoom:`, error);
+      log.error(`Error handling moveParticipantToBreakoutRoom:`, error);
       callback({ error: "Internal server error" });
     }
   });
 
   socket.on("disconnect", (reason) => {
-    console.log(`${LOG_PREFIX} Socket ${socket.id} disconnected. Reason: ${reason}`);
+    const connectionDuration = Date.now() - (socket.connectionTime || Date.now());
+    log.info(`Socket ${socket.id} disconnected after ${connectionDuration}ms`, {
+      userName: socket.userName || 'unknown',
+      roomName: socket.roomName || 'unknown',
+      userId: socket.userId || 'unknown'
+    });
     handleUserLeaving(socket);
   });
 });
@@ -1723,14 +1760,14 @@ function handleUserLeaving(socket) {
       try {
         peer.transports[key].close();
       } catch (e) {
-        console.error(`${LOG_PREFIX} Error closing transport ${key} for socket ${socket.id}:`, e);
+        log.error(`Error closing transport ${key} for socket ${socket.id}:`, e);
       }
     }
     peer.producers.forEach((producer) => {
       try {
         producer.close();
       } catch (e) {
-        console.error(`${LOG_PREFIX} Error closing producer ${producer.id} for socket ${socket.id}:`, e);
+        log.error(`Error closing producer ${producer.id} for socket ${socket.id}:`, e);
       }
       socket.to(roomName).emit("producerClosed", { remoteProducerId: producer.id, userId: socket.userId });
     });
@@ -1738,13 +1775,13 @@ function handleUserLeaving(socket) {
       try {
         consumer.close();
       } catch (e) {
-        console.error(`${LOG_PREFIX} Error closing consumer ${consumer.id} for socket ${socket.id}:`, e);
+        log.error(`Error closing consumer ${consumer.id} for socket ${socket.id}:`, e);
       }
     });
   }
   room.peers.delete(socket.id);
   socket.leave(roomName);
-  console.log(`${LOG_PREFIX} User ${socket.userId} left room ${roomName}`);
+  log.info(`User ${socket.userId} left room ${roomName}`);
   
   // If this is a breakout room and it's now empty, notify the main room
   if (socket.isBreakoutRoom && socket.mainRoomId && room.peers.size === 0) {
@@ -1757,13 +1794,13 @@ function handleUserLeaving(socket) {
   }
   
   if (room.peers.size === 0) {
-    console.log(`${LOG_PREFIX} Room ${roomName} is empty. Cleaning up.`);
+    log.info(`Room ${roomName} is empty. Cleaning up.`);
     closeAndCleanupRoom(roomName);
     
     // If this was a main room with breakout rooms, clean those up too
     const breakoutRoomIds = breakoutRooms.get(roomName) || [];
     if (breakoutRoomIds.length > 0) {
-      console.log(`${LOG_PREFIX} Cleaning up ${breakoutRoomIds.length} breakout rooms for main room ${roomName}`);
+      log.info(`Cleaning up ${breakoutRoomIds.length} breakout rooms for main room ${roomName}`);
       breakoutRoomIds.forEach(breakoutRoomId => {
         const breakoutRoom = rooms.get(breakoutRoomId);
         if (breakoutRoom) {
@@ -1785,13 +1822,13 @@ async function closeAndCleanupRoom(roomName) {
   if (!room) return;
   try {
     room.router.close();
-    console.log(`${LOG_PREFIX} Closed router for room ${roomName}`);
+    log.info(`Closed router for room ${roomName}`);
   } catch (error) {
-    console.error(`${LOG_PREFIX} Error closing router for room ${roomName}:`, error);
+    log.error(`Error closing router for room ${roomName}:`, error);
   }
   releaseWorker(room.worker);
   rooms.delete(roomName);
-  console.log(`${LOG_PREFIX} Room ${roomName} removed from active rooms`);
+  log.info(`Room ${roomName} removed from active rooms`);
 }
 
 // ------------------------------
@@ -1799,49 +1836,49 @@ async function closeAndCleanupRoom(roomName) {
 // ------------------------------
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`${LOG_PREFIX} Server is running on port ${PORT}`);
-  console.log(`${LOG_PREFIX} Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(`${LOG_PREFIX} Workers count: ${workers.length}`);
-  console.log(`${LOG_PREFIX} Announced IP: ${process.env.ANNOUNCED_IP || "default"}`);
-  console.log(`${LOG_PREFIX} Available endpoints:`);
-  console.log(`${LOG_PREFIX} - GET /health`);
-  console.log(`${LOG_PREFIX} - GET /`);
-  console.log(`${LOG_PREFIX} - WebSocket connection`);
+  log.info(`Server is running on port ${PORT}`);
+  log.info(`Environment: ${process.env.NODE_ENV || "development"}`);
+  log.info(`Workers count: ${workers.length}`);
+  log.info(`Announced IP: ${process.env.ANNOUNCED_IP || "default"}`);
+  log.info(`Available endpoints:`);
+  log.info(` - GET /health`);
+  log.info(` - GET /`);
+  log.info(` - WebSocket connection`);
 });
 
 io.on("error", (error) => {
-  console.error(`${LOG_PREFIX} Socket.io server error:`, error);
+  log.error(`Socket.io server error:`, error);
 });
 
 io.engine.on("connection_error", (err) => {
-  console.error(`${LOG_PREFIX} Socket.io connection error:`, err);
+  log.error(`Socket.io connection error:`, err);
   if (err.code === 1) {
-    console.error(`${LOG_PREFIX} Transport error:`, err.message);
+    log.error(`Transport error:`, err.message);
   } else if (err.code === 2) {
-    console.error(`${LOG_PREFIX} Protocol error:`, err.message);
+    log.error(`Protocol error:`, err.message);
   }
 });
 
 io.engine.on("upgradeError", (err) => {
-  console.error(`${LOG_PREFIX} Socket.io upgrade error:`, err);
+  log.error(`Socket.io upgrade error:`, err);
 });
 
 io.engine.on("transportError", (err) => {
-  console.error(`${LOG_PREFIX} Socket.io transport error:`, err);
+  log.error(`Socket.io transport error:`, err);
 });
 
 io.engine.on("wsError", (err) => {
-  console.error(`${LOG_PREFIX} Socket.io websocket error:`, err);
+  log.error(`Socket.io websocket error:`, err);
 });
 
 io.engine.on("close", (err) => {
-  console.error(`${LOG_PREFIX} Socket.io connection closed:`, err);
+  log.error(`Socket.io connection closed:`, err);
 });
 
 io.use((socket, next) => {
   const clientVersion = socket.handshake.headers["x-client-version"];
   const clientType = socket.handshake.headers["x-client-type"];
-  console.log(`${LOG_PREFIX} Client connected with version: ${clientVersion}, type: ${clientType}`);
+  log.info(`Client connected with version: ${clientVersion}, type: ${clientType}`);
   next();
 });
 
@@ -1849,7 +1886,7 @@ io.use((socket, next) => {
   const clientTime = socket.handshake.query.clientTime;
   if (clientTime) {
     const timeDiff = Date.now() - parseInt(clientTime);
-    console.log(`${LOG_PREFIX} Client time difference: ${timeDiff}ms`);
+    log.info(`Client time difference: ${timeDiff}ms`);
   }
   next();
 });
@@ -1858,22 +1895,22 @@ process.on("SIGINT", cleanupAndExit);
 process.on("SIGTERM", cleanupAndExit);
 
 function cleanupAndExit() {
-  console.log(`${LOG_PREFIX} Cleaning up rooms before exit...`);
+  log.info(`Cleaning up rooms before exit...`);
   for (const roomName of rooms.keys()) {
     closeAndCleanupRoom(roomName);
   }
   server.close(() => {
-    console.log(`${LOG_PREFIX} Server closed successfully`);
+    log.info(`Server closed successfully`);
     process.exit(0);
   });
   setTimeout(() => {
-    console.error(`${LOG_PREFIX} Forced exit due to cleanup timeout`);
+    log.error(`Forced exit due to cleanup timeout`);
     process.exit(1);
   }, 5000);
 }
 
 app.use((req, res, next) => {
-  console.log(`${LOG_PREFIX} Setting CORS headers for request from ${req.ip}`);
+  log.info(`Setting CORS headers for request from ${req.ip}`);
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
@@ -1903,7 +1940,7 @@ function handleDashboardConnection(socket, authData) {
     socket.emit('auth_success', { token: newToken });
   }
   
-  console.log(`${LOG_PREFIX} Admin authenticated: ${email}`);
+  log.info(`Admin authenticated: ${email}`);
   
   socket.isAdmin = true;
   socket.adminEmail = email;
@@ -1931,7 +1968,7 @@ function setupDashboardSocketHandlers(socket) {
     const { enabled } = data;
     useAlternativeMeetingLinks = enabled === true;
     
-    console.log(`${LOG_PREFIX} Killswitch ${useAlternativeMeetingLinks ? 'ENABLED' : 'DISABLED'} by admin: ${socket.adminEmail}`);
+    log.info(`Killswitch ${useAlternativeMeetingLinks ? 'ENABLED' : 'DISABLED'} by admin: ${socket.adminEmail}`);
     
     io.emit('server-status-change', { 
       useAlternativeMeetingLinks,
@@ -1953,9 +1990,9 @@ function setupDashboardSocketHandlers(socket) {
       socket.emit('room_closed', { roomId });
       socket.broadcast.emit('room_closed', { roomId });
       
-      console.log(`${LOG_PREFIX} Room ${roomId} closed by admin: ${socket.adminEmail}`);
+      log.info(`Room ${roomId} closed by admin: ${socket.adminEmail}`);
     } catch (err) {
-      console.error(`${LOG_PREFIX} Error closing room:`, err);
+      log.error(`Error closing room:`, err);
       socket.emit('error', { message: 'Failed to close room' });
     }
   });
@@ -1973,12 +2010,12 @@ function setupDashboardSocketHandlers(socket) {
     userSocket.emit('kicked');
     userSocket.disconnect(true);
     
-    console.log(`${LOG_PREFIX} User ${userId} kicked from room ${roomId} by admin: ${socket.adminEmail}`);
+    log.info(`User ${userId} kicked from room ${roomId} by admin: ${socket.adminEmail}`);
     
     socket.emit('user_kicked', { roomId, userId });
   });
   
   socket.on('disconnect', () => {
-    console.log(`${LOG_PREFIX} Admin disconnected: ${socket.adminEmail}`);
+    log.info(`Admin disconnected: ${socket.adminEmail}`);
   });
 }
