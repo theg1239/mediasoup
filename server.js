@@ -1365,7 +1365,7 @@ io.on("connection", async (socket) => {
         producerId: producer.id,
         userId: socket.userId,
         userName: socket.userName,
-        kind
+        kind: data.kind
       });
       
       safeCallback(callback, { id: producer.id });
