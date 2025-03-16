@@ -534,7 +534,7 @@ async function createWebRtcTransport(router) {
     router.createWebRtcTransport(transportOptions)
       .then(async (transport) => {
         clearTimeout(timeout);
-        log.info(`WebRTC transport created: ${transport.id} for user ${socket.userName || 'unknown'} in room ${socket.roomName || 'unknown'}`);
+        log.info(`WebRTC transport created: ${transport.id}`);
         
         if (maxIncomingBitrate) {
           try {
@@ -551,7 +551,7 @@ async function createWebRtcTransport(router) {
         );
         
         transport.on("icestatechange", (state) => {
-          log.info(`Transport ${transport.id} ICE state changed to: ${state} for user ${socket.userName || 'unknown'}`);
+          log.info(`Transport ${transport.id} ICE state changed to: ${state}`);
           if (state === "failed") {
             transport.restartIce()
               .then(() => log.info(`ICE restarted for transport ${transport.id}`))
