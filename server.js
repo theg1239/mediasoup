@@ -158,13 +158,58 @@ function getListenIps() {
   console.log(`${LOG_PREFIX} Determining listen IPs for mediasoup...`);
   const interfaces = os.networkInterfaces();
   console.log(`${LOG_PREFIX} Available network interfaces:`, interfaces);
+  
   const listenIps = [];
   const publicIp = process.env.ANNOUNCED_IP || null;
-  listenIps.push({ ip: "0.0.0.0", announcedIp: publicIp });
-  console.log(`${LOG_PREFIX} Using listen IP: 0.0.0.0 with announced IP: ${publicIp}`);
+  
+  listenIps.push({ 
+    ip: "0.0.0.0", 
+    announcedIp: publicIp 
+  });
+  
+  console.log(`${LOG_PREFIX} Using listen IP: 0.0.0.0 with announced IP: ${publicIp || 'none'}`);
+  
+  // If no public IP is set, try to find a reasonable default
   if (!publicIp) {
     console.warn(`${LOG_PREFIX} WARNING: No ANNOUNCED_IP set. Remote clients may have connectivity issues.`);
+    
+    let fallbackIp = null;
+    
+    try {
+      Object.keys(interfaces).forEach((interfaceName) => {
+        const networkInterface = interfaces[interfaceName];
+        if (networkInterface) {
+          networkInterface.forEach((address) => {
+            // Skip internal and IPv6 addresses
+            if (!address.internal && address.family === 'IPv4') {
+              fallbackIp = address.address;
+              console.log(`${LOG_PREFIX} Found potential fallback IP: ${fallbackIp} on interface ${interfaceName}`);
+            }
+          });
+        }
+      });
+      
+      if (fallbackIp && fallbackIp !== '127.0.0.1') {
+        listenIps.push({ 
+          ip: fallbackIp, 
+          announcedIp: null 
+        });
+        console.log(`${LOG_PREFIX} Added fallback listen IP: ${fallbackIp}`);
+      }
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error finding fallback IP:`, error);
+    }
   }
+  
+  if (listenIps.length === 0) {
+    console.error(`${LOG_PREFIX} No valid listen IPs found, using 127.0.0.1 as fallback`);
+    listenIps.push({ 
+      ip: "127.0.0.1", 
+      announcedIp: null 
+    });
+  }
+  
+  console.log(`${LOG_PREFIX} Final listen IPs:`, JSON.stringify(listenIps));
   return listenIps;
 }
 
@@ -415,13 +460,30 @@ async function getOrCreateRoom(roomName) {
 // ------------------------------
 async function createWebRtcTransport(router) {
   console.log(`${LOG_PREFIX} Creating WebRTC transport on router ${router.id}`);
+  
+  // Check router state
+  if (!router || router.closed) {
+    console.error(`${LOG_PREFIX} Router is invalid or closed: ${router?.id}`);
+    throw new Error("Router is invalid or closed");
+  }
+  
   const { listenIps, initialAvailableOutgoingBitrate, maxIncomingBitrate } = mediasoupOptions.webRtcTransport;
+  
+  // Validate listenIps
+  if (!listenIps || !Array.isArray(listenIps) || listenIps.length === 0) {
+    console.error(`${LOG_PREFIX} Invalid listenIps configuration:`, listenIps);
+    throw new Error("Invalid listenIps configuration");
+  }
+  
+  console.log(`${LOG_PREFIX} Using listenIps:`, JSON.stringify(listenIps));
+  
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       const errMsg = `${LOG_PREFIX} Timeout creating WebRTC transport`;
       console.error(errMsg);
       reject(new Error(errMsg));
     }, 10000);
+    
     const transportOptions = {
       listenIps,
       enableUdp: true,
@@ -446,17 +508,33 @@ async function createWebRtcTransport(router) {
         ]
       }
     };
+    
+    console.log(`${LOG_PREFIX} Creating transport with options:`, JSON.stringify({
+      enableUdp: transportOptions.enableUdp,
+      enableTcp: transportOptions.enableTcp,
+      preferUdp: transportOptions.preferUdp,
+      initialAvailableOutgoingBitrate: transportOptions.initialAvailableOutgoingBitrate,
+      iceConsentTimeout: transportOptions.iceConsentTimeout
+    }));
+    
     router.createWebRtcTransport(transportOptions)
       .then(async (transport) => {
         clearTimeout(timeout);
         console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.id}`);
+        
         if (maxIncomingBitrate) {
-          await transport.setMaxIncomingBitrate(maxIncomingBitrate);
-          console.log(`${LOG_PREFIX} Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
+          try {
+            await transport.setMaxIncomingBitrate(maxIncomingBitrate);
+            console.log(`${LOG_PREFIX} Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
+          } catch (bitrateError) {
+            console.warn(`${LOG_PREFIX} Error setting max incoming bitrate: ${bitrateError.message}`);
+          }
         }
+        
         transport.on("routerclose", () =>
           console.log(`${LOG_PREFIX} Transport ${transport.id} closed (router closed)`)
         );
+        
         transport.on("icestatechange", (state) => {
           console.log(`${LOG_PREFIX} Transport ${transport.id} ICE state: ${state}`);
           if (state === "failed") {
@@ -465,26 +543,38 @@ async function createWebRtcTransport(router) {
               .catch((error) => console.error(`${LOG_PREFIX} ICE restart error for ${transport.id}:`, error));
           }
         });
+        
         transport.on("dtlsstatechange", (state) => {
           console.log(`${LOG_PREFIX} Transport ${transport.id} DTLS state: ${state}`);
         });
+        
         transport.on("sctpstatechange", (state) => {
           console.log(`${LOG_PREFIX} Transport ${transport.id} SCTP state: ${state}`);
         });
+        
+        const params = {
+          id: transport.id,
+          iceParameters: transport.iceParameters,
+          iceCandidates: transport.iceCandidates,
+          dtlsParameters: transport.dtlsParameters,
+          sctpParameters: transport.sctpParameters
+        };
+        
+        console.log(`${LOG_PREFIX} Transport params ready: ${transport.id}`);
+        
         resolve({
           transport,
-          params: {
-            id: transport.id,
-            iceParameters: transport.iceParameters,
-            iceCandidates: transport.iceCandidates,
-            dtlsParameters: transport.dtlsParameters,
-            sctpParameters: transport.sctpParameters
-          }
+          params
         });
       })
       .catch((error) => {
         clearTimeout(timeout);
         console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+        console.error(`${LOG_PREFIX} Transport options used:`, JSON.stringify({
+          listenIps: transportOptions.listenIps,
+          enableUdp: transportOptions.enableUdp,
+          enableTcp: transportOptions.enableTcp
+        }));
         reject(error);
       });
   });
@@ -1135,12 +1225,14 @@ io.on("connection", async (socket) => {
   // Handle createWebRtcTransport request
   socket.on("createWebRtcTransport", async (data, callback) => {
     try {
-      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}`);
+      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}, socketId: ${socket.id}`);
+      console.log(`${LOG_PREFIX} Socket state: connected=${socket.connected}, roomName=${socket.roomName}`);
       
       // Validate room and peer
       const room = rooms.get(socket.roomName);
       if (!room) {
         console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.roomName}`);
+        console.error(`${LOG_PREFIX} Available rooms: ${Array.from(rooms.keys()).join(', ')}`);
         safeCallback(callback, { error: "Room not found" });
         return;
       }
@@ -1148,32 +1240,37 @@ io.on("connection", async (socket) => {
       const peer = room.peers.get(socket.id);
       if (!peer) {
         console.error(`${LOG_PREFIX} Peer not found for transport creation: ${socket.id}`);
+        console.error(`${LOG_PREFIX} Available peers in room: ${Array.from(room.peers.keys()).join(', ')}`);
         safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
       // Create the WebRTC transport
       console.log(`${LOG_PREFIX} Creating WebRTC transport with router ${room.router.id}`);
-      const { transport, params } = await createWebRtcTransport(room.router);
       
-      // Store the transport
-      peer.transports[transport.id] = transport;
-      
-      // Handle transport closure
-      transport.on("close", () => {
-        console.log(`${LOG_PREFIX} Transport ${transport.id} closed`);
-        delete peer.transports[transport.id];
-      });
-      
-      // Notify client about transport creation
-      console.log(`${LOG_PREFIX} WebRTC transport created successfully: ${transport.id}`);
-      socket.emit("webrtc-transport-created", {
-        transportId: transport.id,
-        type: data.consumer ? "consumer" : "producer"
-      });
-      
-      // Return transport parameters to client
-      safeCallback(callback, { params });
+      try {
+        const { transport, params } = await createWebRtcTransport(room.router);
+        
+        peer.transports[transport.id] = transport;
+        
+        transport.on("close", () => {
+          console.log(`${LOG_PREFIX} Transport ${transport.id} closed`);
+          delete peer.transports[transport.id];
+        });
+        
+        console.log(`${LOG_PREFIX} WebRTC transport created successfully: ${transport.id}`);
+        socket.emit("webrtc-transport-created", {
+          transportId: transport.id,
+          type: data.consumer ? "consumer" : "producer"
+        });
+        
+        console.log(`${LOG_PREFIX} Sending transport params back to client: ${JSON.stringify(params.id)}`);
+        safeCallback(callback, { params });
+      } catch (transportError) {
+        console.error(`${LOG_PREFIX} Error in createWebRtcTransport function:`, transportError);
+        console.error(`${LOG_PREFIX} Router state: id=${room.router.id}, closed=${room.router.closed}`);
+        safeCallback(callback, { error: `Transport creation error: ${transportError.message}` });
+      }
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
       safeCallback(callback, { error: error.message });
