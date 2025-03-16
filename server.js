@@ -711,7 +711,7 @@ io.on("connection", async (socket) => {
       if (room.peers.has(socket.id)) {
         console.log(`${LOG_PREFIX} User ${userName} (${userId}) already in room ${roomName}`);
         // Just update the callback with current state
-        callback({
+        safeCallback(callback, {
           rtpCapabilities: room.router.rtpCapabilities,
           isAdmin: socket.isAdmin,
           isBreakoutRoom,
@@ -763,7 +763,7 @@ io.on("connection", async (socket) => {
       }
       
       // Send room info to the client
-      callback({
+      safeCallback(callback, {
         rtpCapabilities: room.router.rtpCapabilities,
         existingProducers,
         isAdmin: socket.isAdmin,
@@ -775,7 +775,7 @@ io.on("connection", async (socket) => {
       console.log(`${LOG_PREFIX} User ${userName} (${userId}) joined room ${roomName}`);
     } catch (error) {
       console.error(`${LOG_PREFIX} Error joining room:`, error);
-      callback({ error: error.message });
+      safeCallback(callback, { error: error.message });
     }
   });
 
@@ -1132,10 +1132,12 @@ io.on("connection", async (socket) => {
     }
   });
 
+  // Handle createWebRtcTransport request
   socket.on("createWebRtcTransport", async (data, callback) => {
     try {
       console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}`);
       
+      // Validate room and peer
       const room = rooms.get(socket.roomName);
       if (!room) {
         console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.roomName}`);
@@ -1150,22 +1152,27 @@ io.on("connection", async (socket) => {
         return;
       }
       
+      // Create the WebRTC transport
       console.log(`${LOG_PREFIX} Creating WebRTC transport with router ${room.router.id}`);
       const { transport, params } = await createWebRtcTransport(room.router);
       
+      // Store the transport
       peer.transports[transport.id] = transport;
       
+      // Handle transport closure
       transport.on("close", () => {
         console.log(`${LOG_PREFIX} Transport ${transport.id} closed`);
         delete peer.transports[transport.id];
       });
       
+      // Notify client about transport creation
       console.log(`${LOG_PREFIX} WebRTC transport created successfully: ${transport.id}`);
       socket.emit("webrtc-transport-created", {
         transportId: transport.id,
         type: data.consumer ? "consumer" : "producer"
       });
       
+      // Return transport parameters to client
       safeCallback(callback, { params });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
@@ -1239,6 +1246,7 @@ io.on("connection", async (socket) => {
     }
   });
 
+  // Handle deviceReady event - client is ready to receive consumers
   socket.on("deviceReady", async (data, callback) => {
     try {
       console.log(`${LOG_PREFIX} Device ready for user ${socket.userId}`);
@@ -1257,9 +1265,11 @@ io.on("connection", async (socket) => {
         return;
       }
       
+      // Mark the peer's device as loaded
       peer.deviceLoaded = true;
       console.log(`${LOG_PREFIX} Device marked as loaded for user ${socket.userId}`);
       
+      // Notify the client that we've received their deviceReady event
       safeCallback(callback, { success: true });
     } catch (error) {
       console.error(`${LOG_PREFIX} Error handling deviceReady:`, error);
