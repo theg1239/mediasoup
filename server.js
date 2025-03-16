@@ -8,12 +8,27 @@ const socketIo = require("socket.io");
 const mediasoup = require("mediasoup");
 const os = require("os");
 const path = require("path");
+const cookieParser = require("cookie-parser");
+const session = require("express-session");
+const crypto = require("crypto");
 require("dotenv").config();
 
 const app = express();
 const LOG_PREFIX = "[MediasoupServer]";
 
 app.use(express.json());
+app.use(cookieParser());
+
+app.use(session({
+  secret: process.env.SESSION_SECRET || "haha",
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: true,
+    httpOnly: true,
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
 
 const sslOptions = {
   key: fs.readFileSync(path.join(__dirname, "mediasoup-certs1", "privkey.pem")),
@@ -87,6 +102,10 @@ app.get("/health", (req, res) => {
 });
 
 app.use(express.static("public"));
+
+app.get("/dashboard", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "dashboard", "index.html"));
+});
 
 app.get("/", (req, res) => {
   console.log(`${LOG_PREFIX} Root endpoint requested from ${req.ip}`);
@@ -453,10 +472,204 @@ async function createWebRtcTransport(router) {
 }
 
 // ------------------------------
+// Dashboard Authentication & API Endpoints
+// ------------------------------
+
+const adminTokens = new Map();
+
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function requireAuth(req, res, next) {
+  const token = req.headers.authorization?.split(' ')[1];
+  const email = req.headers['x-admin-email'];
+  
+  if (!token || !email || !adminTokens.has(email) || adminTokens.get(email) !== token) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  
+  next();
+}
+
+// Dashboard API routes
+app.post("/api/auth", (req, res) => {
+  const { email, secret } = req.body || {};
+  
+  if (!email || !secret) {
+    return res.status(400).json({ error: "Email and secret are required" });
+  }
+  
+  const facetimeEmails = (process.env.FACETIME_EMAILS || "").split(",").map(e => e.trim().toLowerCase());
+  
+  if (!facetimeEmails.includes(email.toLowerCase()) || secret !== process.env.ADMIN_SECRET) {
+    return res.status(401).json({ error: "Invalid credentials" });
+  }
+  
+  const token = generateToken();
+  adminTokens.set(email, token);
+  
+  res.status(200).json({ 
+    status: "success",
+    token
+  });
+});
+
+app.get("/api/server-stats", requireAuth, (req, res) => {
+  const stats = getServerStats();
+  res.status(200).json(stats);
+});
+
+app.get("/api/rooms", requireAuth, (req, res) => {
+  const roomsData = getRoomsData();
+  res.status(200).json(roomsData);
+});
+
+app.get("/api/breakout-rooms", requireAuth, (req, res) => {
+  const breakoutRoomsData = getBreakoutRoomsData();
+  res.status(200).json(breakoutRoomsData);
+});
+
+app.post("/api/rooms/:roomId/close", requireAuth, (req, res) => {
+  const { roomId } = req.params;
+  
+  if (!rooms.has(roomId) && !breakoutRooms.has(roomId)) {
+    return res.status(404).json({ error: "Room not found" });
+  }
+  
+  closeAndCleanupRoom(roomId)
+    .then(() => {
+      res.status(200).json({ status: "success" });
+    })
+    .catch(err => {
+      console.error(`${LOG_PREFIX} Error closing room:`, err);
+      res.status(500).json({ error: "Failed to close room" });
+    });
+});
+
+app.post("/api/rooms/:roomId/users/:userId/kick", requireAuth, (req, res) => {
+  const { roomId, userId } = req.params;
+  
+  if (!rooms.has(roomId) && !breakoutRooms.has(roomId)) {
+    return res.status(404).json({ error: "Room not found" });
+  }
+  
+  const room = rooms.get(roomId);
+  const userSocket = [...io.sockets.sockets.values()].find(s => s.id === userId || s.userId === userId);
+  
+  if (!userSocket) {
+    return res.status(404).json({ error: "User not found" });
+  }
+  
+  userSocket.emit('kicked');
+  userSocket.disconnect(true);
+  
+  res.status(200).json({ status: "success" });
+});
+
+function getServerStats() {
+  const cpuUsage = process.cpuUsage();
+  const memoryUsage = process.memoryUsage();
+  
+  const networkInterfaces = os.networkInterfaces();
+  
+  return {
+    uptime: process.uptime(),
+    cpuUsage: (cpuUsage.user + cpuUsage.system) / 1000000,
+    memoryUsage: memoryUsage.rss,
+    heapUsage: memoryUsage.heapUsed,
+    workersCount: workers.length,
+    roomsCount: rooms.size,
+    breakoutRoomsCount: breakoutRooms.size,
+    usersCount: io.sockets.sockets.size,
+    hostname: os.hostname(),
+    platform: os.platform(),
+    cpuCores: os.cpus().length,
+    totalMemory: os.totalmem(),
+    networkInterfaces,
+    useAlternativeMeetingLinks,
+    workers: workers.map(worker => ({
+      pid: worker.pid,
+      load: workerLoadCount.get(worker) || 0
+    }))
+  };
+}
+
+function getRoomsData() {
+  const roomsData = [];
+  
+  for (const [roomId, room] of rooms.entries()) {
+    if (breakoutToMainRoom.has(roomId)) continue;
+    
+    const users = [];
+    
+    for (const [socketId, socket] of io.sockets.sockets.entries()) {
+      if (socket.roomId === roomId) {
+        users.push({
+          id: socketId,
+          displayName: socket.displayName || 'Anonymous',
+          role: socket.role || 'Participant'
+        });
+      }
+    }
+    
+    roomsData.push({
+      roomId,
+      createdAt: room.createdAt || Date.now(),
+      workerId: room.workerId || 0,
+      users
+    });
+  }
+  
+  return roomsData;
+}
+
+function getBreakoutRoomsData() {
+  const breakoutRoomsData = [];
+  
+  for (const [roomId, room] of rooms.entries()) {
+    if (!breakoutToMainRoom.has(roomId)) continue;
+    
+    const mainRoomId = breakoutToMainRoom.get(roomId);
+    const users = [];
+    
+    for (const [socketId, socket] of io.sockets.sockets.entries()) {
+      if (socket.roomId === roomId) {
+        users.push({
+          id: socketId,
+          displayName: socket.displayName || 'Anonymous',
+          role: socket.role || 'Participant'
+        });
+      }
+    }
+    
+    breakoutRoomsData.push({
+      roomId,
+      mainRoomId,
+      createdAt: room.createdAt || Date.now(),
+      workerId: room.workerId || 0,
+      users
+    });
+  }
+  
+  return breakoutRoomsData;
+}
+
+// ------------------------------
 // Socket & Room Management
 // ------------------------------
-io.on("connection", (socket) => {
+io.on("connection", async (socket) => {
   console.log(`${LOG_PREFIX} New socket connection: ${socket.id}`);
+  
+  // Handle dashboard authentication
+  const authData = socket.handshake.auth || {};
+  
+  // Check if this is a dashboard admin connection
+  if (authData.email && (authData.secret || authData.token)) {
+    handleDashboardConnection(socket, authData);
+    return;
+  }
+
   socket.data = {};
 
   // Handle user joining a room
@@ -1480,4 +1693,107 @@ function safeCallback(callback, data) {
       console.error(`${LOG_PREFIX} Error in callback:`, error);
     }
   }
+}
+
+function handleDashboardConnection(socket, authData) {
+  const { email, secret, token } = authData;
+  
+  if (token) {
+    if (!adminTokens.has(email) || adminTokens.get(email) !== token) {
+      socket.emit('auth_error', { message: 'Invalid token' });
+      socket.disconnect(true);
+      return;
+    }
+  } else {
+    const facetimeEmails = (process.env.FACETIME_EMAILS || "").split(",").map(e => e.trim().toLowerCase());
+    
+    if (!facetimeEmails.includes(email.toLowerCase()) || secret !== process.env.ADMIN_SECRET) {
+      socket.emit('auth_error', { message: 'Invalid credentials' });
+      socket.disconnect(true);
+      return;
+    }
+    
+    const newToken = generateToken();
+    adminTokens.set(email, newToken);
+    socket.emit('auth_success', { token: newToken });
+  }
+  
+  console.log(`${LOG_PREFIX} Admin authenticated: ${email}`);
+  
+  socket.isAdmin = true;
+  socket.adminEmail = email;
+  
+  setupDashboardSocketHandlers(socket);
+}
+
+function setupDashboardSocketHandlers(socket) {
+  socket.on('get_server_stats', () => {
+    const stats = getServerStats();
+    socket.emit('server_stats', stats);
+  });
+  
+  socket.on('get_rooms', () => {
+    const roomsData = getRoomsData();
+    socket.emit('rooms_data', roomsData);
+  });
+  
+  socket.on('get_breakout_rooms', () => {
+    const breakoutRoomsData = getBreakoutRoomsData();
+    socket.emit('breakout_rooms_data', breakoutRoomsData);
+  });
+  
+  socket.on('toggle_killswitch', (data) => {
+    const { enabled } = data;
+    useAlternativeMeetingLinks = enabled === true;
+    
+    console.log(`${LOG_PREFIX} Killswitch ${useAlternativeMeetingLinks ? 'ENABLED' : 'DISABLED'} by admin: ${socket.adminEmail}`);
+    
+    io.emit('server-status-change', { 
+      useAlternativeMeetingLinks,
+      timestamp: Date.now()
+    });
+  });
+  
+  socket.on('close_room', async (data) => {
+    const { roomId } = data;
+    
+    if (!rooms.has(roomId)) {
+      socket.emit('error', { message: 'Room not found' });
+      return;
+    }
+    
+    try {
+      await closeAndCleanupRoom(roomId);
+      
+      socket.emit('room_closed', { roomId });
+      socket.broadcast.emit('room_closed', { roomId });
+      
+      console.log(`${LOG_PREFIX} Room ${roomId} closed by admin: ${socket.adminEmail}`);
+    } catch (err) {
+      console.error(`${LOG_PREFIX} Error closing room:`, err);
+      socket.emit('error', { message: 'Failed to close room' });
+    }
+  });
+  
+  socket.on('kick_user', (data) => {
+    const { roomId, userId } = data;
+    
+    const userSocket = [...io.sockets.sockets.values()].find(s => s.id === userId || s.userId === userId);
+    
+    if (!userSocket) {
+      socket.emit('error', { message: 'User not found' });
+      return;
+    }
+    
+    userSocket.emit('kicked');
+    userSocket.disconnect(true);
+    
+    console.log(`${LOG_PREFIX} User ${userId} kicked from room ${roomId} by admin: ${socket.adminEmail}`);
+    
+    socket.emit('user_kicked', { roomId, userId });
+  });
+  
+  socket.on('disconnect', () => {
+    console.log(`${LOG_PREFIX} Admin disconnected: ${socket.adminEmail}`);
+  });
 }

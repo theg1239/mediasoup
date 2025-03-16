@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediaSoup Server</title>
+    <style>
+        :root {
+            --dark-bg: #121212;
+            --dark-surface: #1e1e1e;
+            --dark-text: #e0e0e0;
+            --dark-text-secondary: #a0a0a0;
+            --dark-primary: #bb86fc;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--dark-bg);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            text-align: center;
+            color: var(--dark-text);
+        }
+        
+        .container {
+            max-width: 400px;
+            padding: 2rem;
+        }
+        
+        h1 {
+            color: var(--dark-primary);
+            margin-bottom: 1rem;
+            font-size: 1.5rem;
+        }
+        
+        p {
+            margin-bottom: 1rem;
+            color: var(--dark-text-secondary);
+        }
+        
+        a {
+            color: var(--dark-primary);
+            text-decoration: none;
+        }
+        
+        a:hover {
+            text-decoration: underline;
+        }
+        
+        .heart {
+            color: #cf6679;
+            display: inline-block;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.2); }
+            100% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MediaSoup Server</h1>
+        <p>made with <span class="heart">❤️</span></p>
+        <p><a href="/dashboard">dashboard</a></p>
+    </div>
+</body>
+</html> 

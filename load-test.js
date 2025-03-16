@@ -4,7 +4,7 @@ const os = require('os');
 const cluster = require('cluster');
 const numCPUs = os.cpus().length;
 
-const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3001';
+const SERVER_URL = process.env.SERVER_URL || 'https://acm.today';
 const ROOM_COUNT = 15;
 const USERS_PER_ROOM = 20;
 const TOTAL_CONNECTIONS = ROOM_COUNT * USERS_PER_ROOM;
