@@ -13,6 +13,8 @@ require("dotenv").config();
 const app = express();
 const LOG_PREFIX = "[MediasoupServer]";
 
+app.use(express.json());
+
 const sslOptions = {
   key: fs.readFileSync(path.join(__dirname, "mediasoup-certs1", "privkey.pem")),
   cert: fs.readFileSync(path.join(__dirname, "mediasoup-certs1", "fullchain.pem"))
@@ -50,9 +52,38 @@ app.use(cors(corsOptions));
 // ------------------------------
 // Health & Static Endpoints
 // ------------------------------
+let useAlternativeMeetingLinks = false;
+
+app.post("/admin/toggle-kill-switch", (req, res) => {
+  const { enabled, secret } = req.body || {};
+  
+  if (secret !== process.env.ADMIN_SECRET) {
+    console.log(`${LOG_PREFIX} Unauthorized kill switch toggle attempt`);
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  
+  useAlternativeMeetingLinks = enabled === true;
+  console.log(`${LOG_PREFIX} Kill switch ${useAlternativeMeetingLinks ? 'ENABLED' : 'DISABLED'}`);
+  
+  io.emit('server-status-change', { 
+    useAlternativeMeetingLinks,
+    timestamp: Date.now()
+  });
+  
+  res.status(200).json({ 
+    status: "success", 
+    useAlternativeMeetingLinks 
+  });
+});
+
 app.get("/health", (req, res) => {
   console.log(`${LOG_PREFIX} Health check requested`);
-  res.status(200).json({ status: "ok", uptime: process.uptime() });
+  res.status(200).json({ 
+    status: "ok", 
+    uptime: process.uptime(),
+    useAlternativeMeetingLinks,
+    timestamp: Date.now()
+  });
 });
 
 app.use(express.static("public"));
@@ -485,7 +516,7 @@ io.on("connection", (socket) => {
         userName,
         userInitials: userName.substring(0, 2)
       });
-      
+
       // Get existing producers for the room
       const existingProducers = [];
       for (const [peerId, peer] of room.peers.entries()) {
@@ -538,7 +569,7 @@ io.on("connection", (socket) => {
         console.log(`${LOG_PREFIX} Peer not found in room ${roomName}`);
         return;
       }
-      
+
       // Close all transports
       for (const transport of peer.transports.values()) {
         try {
