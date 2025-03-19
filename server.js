@@ -1210,19 +1210,19 @@ io.on("connection", async (socket) => {
     try {
       const room = rooms.get(socket.roomName);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.roomName}`);
+        log.error(`Room not found for transport creation: ${socket.roomName}`);
         callback({ error: "Room not found" });
         return;
       }
 
       const router = room.router;
       if (!router) {
-        console.error(`${LOG_PREFIX} Router not found for room: ${socket.roomName}`);
+        log.error(`Router not found for room: ${socket.roomName}`);
         callback({ error: "Router not found" });
         return;
       }
 
-      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.userId}, consumer: ${consumer}, socketId: ${socket.id}`);
+      log.info(`Creating WebRTC transport for user ${socket.userId}, consumer: ${consumer}, socketId: ${socket.id}`);
       
       const { transport, params } = await createWebRtcTransport(router);
       if (!transport || !params) {
@@ -1230,40 +1230,37 @@ io.on("connection", async (socket) => {
         return;
       }
 
-      console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.id}`);
+      log.info(`WebRTC transport created: ${transport.id}`);
       
-      // Store transport in the appropriate collection
+      // Get peer and store transport
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        console.error(`${LOG_PREFIX} Peer not found for transport storage`);
+        log.error(`Peer not found for transport storage`);
         callback({ error: "Peer not found" });
         return;
       }
 
-      if (consumer) {
-        peer.consumers.set(transport.id, transport);
-      } else {
-        peer.producers.set(transport.id, transport);
+      // Initialize transports Map if it doesn't exist
+      if (!peer.transports) {
+        peer.transports = new Map();
       }
+
+      // Store the transport
+      peer.transports.set(transport.id, transport);
+      log.info(`Transport ${transport.id} stored for peer ${socket.id}`);
 
       // Set max incoming bitrate
       try {
         await transport.setMaxIncomingBitrate(1500000);
-        console.log(`${LOG_PREFIX} Set max incoming bitrate to 1500000 for ${transport.id}`);
+        log.info(`Set max incoming bitrate to 1500000 for ${transport.id}`);
       } catch (error) {
-        console.warn(`${LOG_PREFIX} Could not set max incoming bitrate for ${transport.id}:`, error);
+        log.warn(`Could not set max incoming bitrate for ${transport.id}:`, error);
       }
 
-      // Notify other clients about the transport creation
-      socket.to(socket.roomName).emit("webrtc-transport-created", {
-        transportId: transport.id,
-        type: consumer ? "consumer" : "producer"
-      });
-
-      console.log(`${LOG_PREFIX} Transport params ready: ${transport.id}`);
+      log.info(`Transport params ready: ${transport.id}`);
       callback(params);
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+      log.error(`Error creating WebRTC transport:`, error);
       callback({ error: error.message });
     }
   });
@@ -1283,6 +1280,12 @@ io.on("connection", async (socket) => {
       if (!peer) {
         log.error(`Peer not found for transport connection: ${socket.id}`);
         callback({ error: "Peer not found" });
+        return;
+      }
+
+      if (!peer.transports) {
+        log.error(`No transports collection found for peer ${socket.id}`);
+        callback({ error: "No transports found" });
         return;
       }
 
