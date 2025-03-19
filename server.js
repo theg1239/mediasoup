@@ -55,11 +55,15 @@ const corsOptions = {
       "https://enrollments-25.vercel.app",
       process.env.FRONTEND_URL || "*"
     ];
-    if (!origin) {
-      console.log(`${LOG_PREFIX} No origin provided, allowing by default.`);
+    
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin || allowedOrigins.includes("*")) {
+      console.log(`${LOG_PREFIX} No origin or wildcard allowed`);
       return callback(null, true);
     }
-    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes("*")) {
+
+    // Check if origin matches any allowed origins
+    if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
       console.log(`${LOG_PREFIX} Origin allowed: ${origin}`);
       callback(null, true);
     } else {
@@ -67,7 +71,7 @@ const corsOptions = {
       callback(new Error("Not allowed by CORS"));
     }
   },
-  methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
   credentials: true,
   optionsSuccessStatus: 204,
   allowedHeaders: [
@@ -75,11 +79,17 @@ const corsOptions = {
     "Authorization", 
     "x-client-version", 
     "x-client-type",
-    "x-requested-with"
-  ]
+    "x-requested-with",
+    "Access-Control-Allow-Origin",
+    "Access-Control-Allow-Credentials"
+  ],
+  exposedHeaders: ["Access-Control-Allow-Origin"]
 };
 
 app.use(cors(corsOptions));
+
+// Add CORS preflight handler
+app.options('*', cors(corsOptions));
 
 // ------------------------------
 // Health & Static Endpoints
@@ -143,7 +153,25 @@ app.get("/", (req, res) => {
 const server = https.createServer(sslOptions, app);
 const io = socketIo(server, {
   cors: {
-    origin: ["http://localhost:3000", "https://acm.today", "https://enrollments-25.vercel.app", process.env.FRONTEND_URL || "*"],
+    origin: (origin, callback) => {
+      console.log(`${LOG_PREFIX} Socket.IO CORS check for origin: ${origin}`);
+      const allowedOrigins = [
+        "http://localhost:3000",
+        "https://acm.today",
+        "https://enrollments-25.vercel.app",
+        process.env.FRONTEND_URL || "*"
+      ];
+      
+      if (!origin || allowedOrigins.includes("*")) {
+        return callback(null, true);
+      }
+      
+      if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     methods: ["GET", "POST"],
     credentials: true,
     allowedHeaders: [
@@ -154,20 +182,17 @@ const io = socketIo(server, {
       "x-requested-with"
     ]
   },
-  pingTimeout: 60000,
-  pingInterval: 25000,
-  transports: ["websocket", "polling"],
   allowEIO3: true,
+  pingTimeout: 30000,
+  pingInterval: 10000,
+  transports: ['websocket', 'polling'],
   allowUpgrades: true,
-  maxHttpBufferSize: 1e8,
-  connectTimeout: 30000,
-  upgradeTimeout: 30000,
+  upgrade: true,
   cookie: {
     name: "io",
     httpOnly: true,
-    sameSite: "lax",
-    secure: true,
-    maxAge: 86400000
+    sameSite: "none",
+    secure: true
   }
 });
 
@@ -1257,65 +1282,130 @@ io.on("connection", async (socket) => {
   });
 
   // Handle createWebRtcTransport request
-  socket.on("createWebRtcTransport", async (data, callback) => {
+  socket.on("createWebRtcTransport", async ({ consumer }, callback) => {
     try {
-      log.info(`Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}, socketId: ${socket.id}`);
-      log.info(`Socket state: connected=${socket.connected}, roomName=${socket.roomName}`);
+      const room = rooms.get(socket.data.roomName);
+      if (!room) {
+        console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.data.roomName}`);
+        callback({ error: "Room not found" });
+        return;
+      }
+
+      const router = room.router;
+      if (!router) {
+        console.error(`${LOG_PREFIX} Router not found for room: ${socket.data.roomName}`);
+        callback({ error: "Router not found" });
+        return;
+      }
+
+      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.data.userId}, consumer: ${consumer}, socketId: ${socket.id}`);
+      console.log(`${LOG_PREFIX} Socket state: connected=${socket.connected}, roomName=${socket.data.roomName}`);
+      console.log(`${LOG_PREFIX} Creating WebRTC transport with router ${router.id}`);
+
+      const transport = await createWebRtcTransport(router);
+      if (!transport) {
+        callback({ error: "Failed to create transport" });
+        return;
+      }
+
+      console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.id}`);
       
-      // Validate room and peer
+      // Store transport based on type
+      if (consumer) {
+        room.consumerTransports.set(transport.id, transport);
+      } else {
+        room.producerTransports.set(transport.id, transport);
+      }
+
+      // Set max incoming bitrate
+      try {
+        await transport.setMaxIncomingBitrate(1500000);
+        console.log(`${LOG_PREFIX} Set max incoming bitrate to 1500000 for ${transport.id}`);
+      } catch (error) {
+        console.warn(`${LOG_PREFIX} Could not set max incoming bitrate for ${transport.id}:`, error);
+      }
+
+      console.log(`${LOG_PREFIX} Transport params ready: ${transport.id}`);
+      
+      const params = {
+        id: transport.id,
+        iceParameters: transport.iceParameters,
+        iceCandidates: transport.iceCandidates,
+        dtlsParameters: transport.dtlsParameters,
+        sctpParameters: transport.sctpParameters,
+      };
+
+      // Emit transport creation event to all clients in room
+      socket.to(socket.data.roomName).emit("webrtc-transport-created", {
+        transportId: transport.id,
+        type: consumer ? "consumer" : "producer"
+      });
+
+      console.log(`${LOG_PREFIX} WebRTC transport created successfully: ${transport.id}`);
+      callback(params);
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+      callback({ error: error.message });
+    }
+  });
+
+  socket.on("connectWebRtcTransport", async ({ transportId, dtlsParameters }, callback) => {
+    try {
+      const room = rooms.get(socket.data.roomName);
+      if (!room) {
+        callback({ error: "Room not found" });
+        return;
+      }
+
+      const transport = room.producerTransports.get(transportId) || room.consumerTransports.get(transportId);
+      if (!transport) {
+        callback({ error: "Transport not found" });
+        return;
+      }
+
+      console.log(`${LOG_PREFIX} Connecting transport ${transportId} with DTLS parameters`);
+      await transport.connect({ dtlsParameters });
+      console.log(`${LOG_PREFIX} Transport ${transportId} connected successfully`);
+      
+      callback({ success: true });
+    } catch (error) {
+      console.error(`${LOG_PREFIX} Error connecting transport:`, error);
+      callback({ error: error.message });
+    }
+  });
+
+  // Handle deviceReady event - client is ready to receive consumers
+  socket.on("deviceReady", async (data, callback) => {
+    try {
+      log.info(`Device ready for user ${socket.userId}`);
+      
       const room = rooms.get(socket.roomName);
       if (!room) {
-        log.error(`Room not found for transport creation: ${socket.roomName}`);
-        log.error(`Available rooms: ${Array.from(rooms.keys()).join(', ')}`);
+        log.error(`Room not found for deviceReady: ${socket.roomName}`);
         safeCallback(callback, { error: "Room not found" });
         return;
       }
       
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        log.error(`Peer not found for transport creation: ${socket.id}`);
-        log.error(`Available peers in room: ${Array.from(room.peers.keys()).join(', ')}`);
+        log.error(`Peer not found for deviceReady: ${socket.id}`);
         safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
-      // Create the WebRTC transport
-      log.info(`Creating WebRTC transport with router ${room.router.id}`);
+      // Mark the peer's device as loaded
+      peer.deviceLoaded = true;
+      log.info(`Device marked as loaded for user ${socket.userId}`);
       
-      try {
-        const { transport, params } = await createWebRtcTransport(room.router);
-        
-        // Store the transport
-        peer.transports[transport.id] = transport;
-        
-        // Handle transport closure
-        transport.on("close", () => {
-          log.info(`Transport ${transport.id} closed`);
-          delete peer.transports[transport.id];
-        });
-        
-        // Notify client about transport creation
-        log.info(`WebRTC transport created successfully: ${transport.id}`);
-        socket.emit("webrtc-transport-created", {
-          transportId: transport.id,
-          type: data.consumer ? "consumer" : "producer"
-        });
-        
-        // Return transport parameters to client
-        log.info(`Sending transport params back to client: ${JSON.stringify(params.id)}`);
-        safeCallback(callback, { params });
-      } catch (transportError) {
-        log.error(`Error in createWebRtcTransport function:`, transportError);
-        log.error(`Router state: id=${room.router.id}, closed=${room.router.closed}`);
-        safeCallback(callback, { error: `Transport creation error: ${transportError.message}` });
-      }
+      // Notify the client that we've received their deviceReady event
+      safeCallback(callback, { success: true });
     } catch (error) {
-      log.error(`Error creating WebRTC transport:`, error);
+      log.error(`Error handling deviceReady:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
 
-  // transport-connect: acknowledge connection
+  // Handle transport-connect: acknowledge connection
   socket.on("transport-connect", async (data, callback) => {
     try {
       const room = rooms.get(socket.roomName);
@@ -1385,66 +1475,6 @@ io.on("connection", async (socket) => {
       safeCallback(callback, { id: producer.id });
     } catch (error) {
       log.error(`Error creating producer:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-
-  // Handle deviceReady event - client is ready to receive consumers
-  socket.on("deviceReady", async (data, callback) => {
-    try {
-      log.info(`Device ready for user ${socket.userId}`);
-      
-      const room = rooms.get(socket.roomName);
-      if (!room) {
-        log.error(`Room not found for deviceReady: ${socket.roomName}`);
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      
-      const peer = room.peers.get(socket.id);
-      if (!peer) {
-        log.error(`Peer not found for deviceReady: ${socket.id}`);
-        safeCallback(callback, { error: "Peer not found" });
-        return;
-      }
-      
-      // Mark the peer's device as loaded
-      peer.deviceLoaded = true;
-      log.info(`Device marked as loaded for user ${socket.userId}`);
-      
-      // Notify the client that we've received their deviceReady event
-      safeCallback(callback, { success: true });
-    } catch (error) {
-      log.error(`Error handling deviceReady:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-
-  // transport-recv-connect: acknowledge consumer transport connection
-  socket.on("transport-recv-connect", async (data, callback) => {
-    try {
-      const room = rooms.get(socket.roomName);
-      if (!room) {
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      const peer = room.peers.get(socket.id);
-      if (!peer) {
-        safeCallback(callback, { error: "Peer not found" });
-        return;
-      }
-      
-      const transport = peer.transports[data.serverConsumerTransportId];
-      if (!transport) {
-        safeCallback(callback, { error: "Consumer transport not found" });
-        return;
-      }
-      
-      log.info(`Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.userId}`);
-      await transport.connect({ dtlsParameters: data.dtlsParameters });
-      safeCallback(callback);
-    } catch (error) {
-      log.error(`Error connecting consumer transport:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1748,14 +1778,56 @@ io.on("connection", async (socket) => {
     }
   });
 
-  socket.on("disconnect", (reason) => {
-    const connectionDuration = Date.now() - (socket.connectionTime || Date.now());
-    log.info(`Socket ${socket.id} disconnected after ${connectionDuration}ms`, {
-      userName: socket.userName || 'unknown',
-      roomName: socket.roomName || 'unknown',
-      userId: socket.userId || 'unknown'
-    });
-    handleUserLeaving(socket);
+  // Handle heartbeat
+  socket.on("heartbeat", () => {
+    if (!socket.data) {
+      console.warn(`${LOG_PREFIX} Received heartbeat from socket without data`);
+      return;
+    }
+    
+    const room = rooms.get(socket.data.roomName);
+    if (!room) {
+      console.warn(`${LOG_PREFIX} Received heartbeat from socket not in a room`);
+      return;
+    }
+
+    // Update last heartbeat timestamp
+    socket.data.lastHeartbeat = Date.now();
+    
+    // Send immediate response
+    socket.emit("heartbeat-ack");
+  });
+
+  // Handle ping
+  socket.on("ping", (callback) => {
+    if (typeof callback === "function") {
+      callback();
+    } else {
+      socket.emit("pong");
+    }
+  });
+
+  // Setup heartbeat monitoring
+  const heartbeatInterval = setInterval(() => {
+    if (!socket.data || !socket.connected) {
+      clearInterval(heartbeatInterval);
+      return;
+    }
+
+    const now = Date.now();
+    const lastHeartbeat = socket.data.lastHeartbeat || 0;
+    
+    // If no heartbeat for 30 seconds, disconnect the socket
+    if (now - lastHeartbeat > 30000) {
+      console.warn(`${LOG_PREFIX} No heartbeat received for 30 seconds from ${socket.id}, disconnecting`);
+      socket.disconnect(true);
+      clearInterval(heartbeatInterval);
+    }
+  }, 10000);
+
+  // Clean up interval on disconnect
+  socket.on("disconnect", () => {
+    clearInterval(heartbeatInterval);
   });
 });
 
