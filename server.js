@@ -775,6 +775,10 @@ io.on("connection", async (socket) => {
       // Get or create the room
       const room = await getOrCreateRoom(roomName);
       
+      // Store room name in socket data
+      socket.data.roomName = roomName;
+      socket.roomName = roomName;
+      
       // Set admin status on the socket
       socket.isAdmin = isAdmin(userEmail, socket);
       socket.userEmail = userEmail;
@@ -807,9 +811,6 @@ io.on("connection", async (socket) => {
       };
       
       room.peers.set(socket.id, peer);
-      socket.roomName = roomName;
-      socket.userId = userId;
-      socket.userName = userName;
       
       // Join the socket room
       socket.join(roomName);
@@ -1269,25 +1270,36 @@ io.on("connection", async (socket) => {
 
   socket.on("connectWebRtcTransport", async ({ transportId, dtlsParameters }, callback) => {
     try {
-      const room = rooms.get(socket.data.roomName);
+      const roomName = socket.data.roomName || socket.roomName;
+      const room = rooms.get(roomName);
+      
       if (!room) {
+        log.error(`Room not found for transport connection: ${roomName}`);
         callback({ error: "Room not found" });
         return;
       }
 
-      const transport = room.producerTransports.get(transportId) || room.consumerTransports.get(transportId);
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        log.error(`Peer not found for transport connection: ${socket.id}`);
+        callback({ error: "Peer not found" });
+        return;
+      }
+
+      const transport = peer.transports.get(transportId);
       if (!transport) {
+        log.error(`Transport not found: ${transportId}`);
         callback({ error: "Transport not found" });
         return;
       }
 
-      console.log(`${LOG_PREFIX} Connecting transport ${transportId} with DTLS parameters`);
+      log.info(`Connecting transport ${transportId} with DTLS parameters`);
       await transport.connect({ dtlsParameters });
-      console.log(`${LOG_PREFIX} Transport ${transportId} connected successfully`);
+      log.info(`Transport ${transportId} connected successfully`);
       
       callback({ success: true });
     } catch (error) {
-      console.error(`${LOG_PREFIX} Error connecting transport:`, error);
+      log.error(`Error connecting transport:`, error);
       callback({ error: error.message });
     }
   });
