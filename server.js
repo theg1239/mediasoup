@@ -1208,16 +1208,17 @@ io.on("connection", async (socket) => {
   // Handle createWebRtcTransport request
   socket.on("createWebRtcTransport", async ({ consumer }, callback) => {
     try {
-      const room = rooms.get(socket.roomName);
+      const roomName = socket.data.roomName || socket.roomName;
+      const room = rooms.get(roomName);
       if (!room) {
-        log.error(`Room not found for transport creation: ${socket.roomName}`);
+        log.error(`Room not found for transport creation: ${roomName}`);
         callback({ error: "Room not found" });
         return;
       }
 
       const router = room.router;
       if (!router) {
-        log.error(`Router not found for room: ${socket.roomName}`);
+        log.error(`Router not found for room: ${roomName}`);
         callback({ error: "Router not found" });
         return;
       }
@@ -1248,6 +1249,23 @@ io.on("connection", async (socket) => {
       // Store the transport
       peer.transports.set(transport.id, transport);
       log.info(`Transport ${transport.id} stored for peer ${socket.id}`);
+
+      // Add event handlers for transport
+      transport.on('dtlsstatechange', (dtlsState) => {
+        log.info(`Transport ${transport.id} dtls state changed to ${dtlsState}`);
+        if (dtlsState === 'failed' || dtlsState === 'closed') {
+          log.error(`Transport ${transport.id} failed or closed unexpectedly`);
+        }
+      });
+
+      transport.on('icestatechange', (iceState) => {
+        log.info(`Transport ${transport.id} ice state changed to ${iceState}`);
+      });
+
+      transport.observer.on('close', () => {
+        log.info(`Transport ${transport.id} closed`);
+        peer.transports.delete(transport.id);
+      });
 
       // Set max incoming bitrate
       try {
@@ -1365,6 +1383,7 @@ io.on("connection", async (socket) => {
         safeCallback(callback, { error: "Room not found" });
         return;
       }
+      
       const peer = room.peers.get(socket.id);
       if (!peer) {
         log.error(`Peer not found for user ${socket.userId}`);
@@ -1372,9 +1391,9 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      const transport = peer.transports[data.transportId];
+      const transport = peer.transports.get(data.transportId);
       if (!transport) {
-        log.error(`Transport not found for user ${socket.userId}`);
+        log.error(`Transport ${data.transportId} not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Transport not found" });
         return;
       }
@@ -1386,6 +1405,10 @@ io.on("connection", async (socket) => {
         rtpParameters: data.rtpParameters,
         appData: data.appData
       });
+      
+      if (!peer.producers) {
+        peer.producers = new Map();
+      }
       
       peer.producers.set(producer.id, producer);
       log.info(`Producer created: ${producer.id} for user ${socket.userId}`);
