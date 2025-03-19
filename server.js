@@ -69,7 +69,14 @@ const corsOptions = {
   },
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
   credentials: true,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
+  allowedHeaders: [
+    "Content-Type", 
+    "Authorization", 
+    "x-client-version", 
+    "x-client-type",
+    "x-requested-with"
+  ]
 };
 
 app.use(cors(corsOptions));
@@ -138,7 +145,14 @@ const io = socketIo(server, {
   cors: {
     origin: ["http://localhost:3000", "https://acm.today", "https://enrollments-25.vercel.app", process.env.FRONTEND_URL || "*"],
     methods: ["GET", "POST"],
-    credentials: true
+    credentials: true,
+    allowedHeaders: [
+      "Content-Type", 
+      "Authorization", 
+      "x-client-version", 
+      "x-client-type",
+      "x-requested-with"
+    ]
   },
   pingTimeout: 60000,
   pingInterval: 25000,
