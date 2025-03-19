@@ -63,11 +63,15 @@ const corsOptions = {
       "https://enrollments-25.vercel.app",
       process.env.FRONTEND_URL || "*"
     ];
-    if (!origin) {
-      console.log(`${LOG_PREFIX} No origin provided, allowing by default.`);
+    
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin || allowedOrigins.includes("*")) {
+      console.log(`${LOG_PREFIX} No origin or wildcard allowed`);
       return callback(null, true);
     }
-    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins.includes("*")) {
+
+    // Check if origin matches any allowed origins
+    if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
       console.log(`${LOG_PREFIX} Origin allowed: ${origin}`);
       callback(null, true);
     } else {
@@ -75,13 +79,29 @@ const corsOptions = {
       callback(new Error("Not allowed by CORS"));
     }
   },
-  methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE"],
   credentials: true,
-  optionsSuccessStatus: 204
+  optionsSuccessStatus: 204,
+  allowedHeaders: [
+    "Content-Type", 
+    "Authorization", 
+    "x-client-version", 
+    "x-client-type",
+    "x-requested-with",
+    "Access-Control-Allow-Origin",
+    "Access-Control-Allow-Credentials"
+  ],
+  exposedHeaders: ["Access-Control-Allow-Origin"]
 };
 
 app.use(cors(corsOptions));
 
+// Add CORS preflight handler
+app.options('*', cors(corsOptions));
+
+// ------------------------------
+// Health & Static Endpoints
+// ------------------------------
 let useAlternativeMeetingLinks = false;
 
 app.post("/admin/toggle-kill-switch", (req, res) => {
@@ -137,18 +157,47 @@ app.get("/", (req, res) => {
 
 const io = socketIo(server, {
   cors: {
-    origin: ["http://localhost:3000", "http://localhost:3001", "https://acm.today", "https://enrollments-25.vercel.app", process.env.FRONTEND_URL].filter(Boolean),
+    origin: (origin, callback) => {
+      console.log(`${LOG_PREFIX} Socket.IO CORS check for origin: ${origin}`);
+      const allowedOrigins = [
+        "http://localhost:3000",
+        "https://acm.today",
+        "https://enrollments-25.vercel.app",
+        process.env.FRONTEND_URL || "*"
+      ];
+      
+      if (!origin || allowedOrigins.includes("*")) {
+        return callback(null, true);
+      }
+      
+      if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     methods: ["GET", "POST"],
-    credentials: false,
-    allowedHeaders: ["Content-Type", "Authorization", "X-Client-Version", "X-Client-Type"]
+    credentials: true,
+    allowedHeaders: [
+      "Content-Type", 
+      "Authorization", 
+      "x-client-version", 
+      "x-client-type",
+      "x-requested-with"
+    ]
   },
+  allowEIO3: true,
+  pingTimeout: 30000,
+  pingInterval: 10000,
+  transports: ['websocket', 'polling'],
+  allowUpgrades: true,
+  upgrade: true,
   cookie: {
     name: "mediasoup_socket",
     httpOnly: true,
-    secure: !useHttp,
-    maxAge: 24 * 60 * 60 * 1000
-  },
-  transports: ["websocket", "polling"]
+    sameSite: "none",
+    secure: true
+  }
 });
 
 console.log(`${LOG_PREFIX} ${useHttp ? 'HTTP' : 'HTTPS'} and Socket.IO server initialized`);
@@ -433,123 +482,49 @@ async function getOrCreateRoom(roomName) {
 }
 
 async function createWebRtcTransport(router) {
-  console.log(`${LOG_PREFIX} Creating WebRTC transport on router ${router.id}`);
-  
-  if (!router || router.closed) {
-    console.error(`${LOG_PREFIX} Router is invalid or closed: ${router?.id}`);
-    throw new Error("Router is invalid or closed");
-  }
-  
-  const { listenIps, initialAvailableOutgoingBitrate, maxIncomingBitrate } = mediasoupOptions.webRtcTransport;
-  
-  if (!listenIps || !Array.isArray(listenIps) || listenIps.length === 0) {
-    console.error(`${LOG_PREFIX} Invalid listenIps configuration:`, listenIps);
-    throw new Error("Invalid listenIps configuration");
-  }
-  
-  console.log(`${LOG_PREFIX} Using listenIps:`, JSON.stringify(listenIps));
-  
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      const errMsg = `${LOG_PREFIX} Timeout creating WebRTC transport`;
-      console.error(errMsg);
-      reject(new Error(errMsg));
-    }, 10000);
-    
-    const transportOptions = {
-      listenIps,
+  try {
+    console.log(`${LOG_PREFIX} Creating WebRTC transport on router ${router.id}`);
+    console.log(`${LOG_PREFIX} Using listenIps: ${JSON.stringify(mediasoupOptions.webRtcTransport.listenIps)}`);
+
+    const transport = await router.createWebRtcTransport({
+      listenIps: mediasoupOptions.webRtcTransport.listenIps,
       enableUdp: true,
       enableTcp: true,
       preferUdp: true,
-      initialAvailableOutgoingBitrate,
-      enableSctp: true,
-      numSctpStreams: { OS: 1024, MIS: 1024 },
-      maxSctpMessageSize: 262144,
-      iceConsentTimeout: 60,
-      iceRetransmissionTimeout: 1000,
-      additionalSettings: {
-        iceTransportPolicy: "all",
-        iceCandidatePoolSize: 10,
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-          { urls: "stun:stun2.l.google.com:19302" },
-          { urls: "stun:stun3.l.google.com:19302" },
-          { urls: "stun:stun4.l.google.com:19302" },
-          { urls: "stun:stun.stunprotocol.org:3478" }
-        ]
-      }
+      initialAvailableOutgoingBitrate: 1000000,
+      iceConsentTimeout: 60
+    });
+
+    // Extract and structure transport parameters
+    const params = {
+      id: transport.id,
+      iceParameters: transport.iceParameters,
+      iceCandidates: transport.iceCandidates,
+      dtlsParameters: transport.dtlsParameters,
+      sctpParameters: transport.sctpParameters
     };
-    
-    console.log(`${LOG_PREFIX} Creating transport with options:`, JSON.stringify({
-      enableUdp: transportOptions.enableUdp,
-      enableTcp: transportOptions.enableTcp,
-      preferUdp: transportOptions.preferUdp,
-      initialAvailableOutgoingBitrate: transportOptions.initialAvailableOutgoingBitrate,
-      iceConsentTimeout: transportOptions.iceConsentTimeout
-    }));
-    
-    router.createWebRtcTransport(transportOptions)
-      .then(async (transport) => {
-        clearTimeout(timeout);
-        log.info(`WebRTC transport created: ${transport.id}`);
-        
-        if (maxIncomingBitrate) {
-          try {
-            await transport.setMaxIncomingBitrate(maxIncomingBitrate);
-            log.info(`Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
-          } catch (bitrateError) {
-            log.warn(`Error setting max incoming bitrate: ${bitrateError.message}`);
-          }
-        }
-        
-        transport.on("routerclose", () =>
-          log.info(`Transport ${transport.id} closed (router closed)`)
-        );
-        
-        transport.on("icestatechange", (state) => {
-          log.info(`Transport ${transport.id} ICE state changed to: ${state}`);
-          if (state === "failed") {
-            transport.restartIce()
-              .then(() => log.info(`ICE restarted for transport ${transport.id}`))
-              .catch((error) => log.error(`ICE restart error for transport ${transport.id}:`, error));
-          }
-        });
-        
-        transport.on("dtlsstatechange", (state) => {
-          log.info(`Transport ${transport.id} DTLS state: ${state}`);
-        });
-        
-        transport.on("sctpstatechange", (state) => {
-          log.info(`Transport ${transport.id} SCTP state: ${state}`);
-        });
-        
-        const params = {
-          id: transport.id,
-          iceParameters: transport.iceParameters,
-          iceCandidates: transport.iceCandidates,
-          dtlsParameters: transport.dtlsParameters,
-          sctpParameters: transport.sctpParameters
-        };
-        
-        log.info(`Transport params ready: ${transport.id}`);
-        
-        resolve({
-          transport,
-          params
-        });
-      })
-      .catch((error) => {
-        clearTimeout(timeout);
-        log.error(`Error creating WebRTC transport:`, error);
-        log.error(`Transport options used:`, JSON.stringify({
-          listenIps: transportOptions.listenIps,
-          enableUdp: transportOptions.enableUdp,
-          enableTcp: transportOptions.enableTcp
-        }));
-        reject(error);
-      });
-  });
+
+    // Add event handlers for transport
+    transport.on('dtlsstatechange', (dtlsState) => {
+      console.log(`${LOG_PREFIX} Transport ${transport.id} dtls state changed to ${dtlsState}`);
+      if (dtlsState === 'failed' || dtlsState === 'closed') {
+        console.error(`${LOG_PREFIX} Transport ${transport.id} failed or closed unexpectedly`);
+      }
+    });
+
+    transport.on('icestatechange', (iceState) => {
+      console.log(`${LOG_PREFIX} Transport ${transport.id} ice state changed to ${iceState}`);
+    });
+
+    transport.observer.on('close', () => {
+      console.log(`${LOG_PREFIX} Transport ${transport.id} closed`);
+    });
+
+    return { transport, params };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+    throw error;
+  }
 }
 
 const adminTokens = new Map();
@@ -767,20 +742,43 @@ io.on("connection", async (socket) => {
       log.info(`[SocketIO] User ${userName} (${userId}, ${userEmail}) is joining room ${roomName}`);
       
       const room = await getOrCreateRoom(roomName);
-      if (!room) {
-        log.error(`[SocketIO] Failed to get or create room ${roomName}`);
-        safeCallback(callback, { error: "Failed to create room" });
+      
+      // Store room name in socket data
+      socket.data.roomName = roomName;
+      socket.roomName = roomName;
+      
+      // Set admin status on the socket
+      socket.isAdmin = isAdmin(userEmail, socket);
+      socket.userEmail = userEmail;
+      
+      // Check if user is already in the room
+      if (room.peers.has(socket.id)) {
+        log.info(`User ${userName} (${userId}) already in room ${roomName}`);
+        // Just update the callback with current state
+        safeCallback(callback, {
+          rtpCapabilities: room.router.rtpCapabilities,
+          isAdmin: socket.isAdmin,
+          isBreakoutRoom,
+          mainRoomId
+        });
         return;
       }
       
-      log.info(`[SocketIO] Room ${roomName} retrieved or created successfully, ID: ${room.id}`);
+      // Add user to the room
+      const peer = {
+        socket,
+        userId,
+        userName,
+        userEmail,
+        consumers: new Map(),
+        producers: new Map(),
+        transports: new Map(),
+        rtpCapabilities: null,
+        joinTime: Date.now(),
+        deviceLoaded: false
+      };
       
-      socket.userId = userId;
-      socket.userName = userName;
-      socket.userEmail = userEmail;
-      socket.roomName = roomName;
-      socket.isBreakoutRoom = isBreakoutRoom;
-      socket.mainRoomId = mainRoomId;
+      room.peers.set(socket.id, peer);
       
       socket.join(roomName);
       
@@ -1182,59 +1180,159 @@ io.on("connection", async (socket) => {
     }
   });
 
-  socket.on("createWebRtcTransport", async (data, callback) => {
+  // Handle createWebRtcTransport request
+  socket.on("createWebRtcTransport", async ({ consumer }, callback) => {
     try {
-      log.info(`Creating WebRTC transport for user ${socket.userId}, consumer: ${data.consumer}, socketId: ${socket.id}`);
-      log.info(`Socket state: connected=${socket.connected}, roomName=${socket.roomName}`);
+      const roomName = socket.data.roomName || socket.roomName;
+      const room = rooms.get(roomName);
+      if (!room) {
+        log.error(`Room not found for transport creation: ${roomName}`);
+        callback({ error: "Room not found" });
+        return;
+      }
+
+      const router = room.router;
+      if (!router) {
+        log.error(`Router not found for room: ${roomName}`);
+        callback({ error: "Router not found" });
+        return;
+      }
+
+      log.info(`Creating WebRTC transport for user ${socket.userId}, consumer: ${consumer}, socketId: ${socket.id}`);
+      
+      const { transport, params } = await createWebRtcTransport(router);
+      if (!transport || !params) {
+        callback({ error: "Failed to create transport" });
+        return;
+      }
+
+      log.info(`WebRTC transport created: ${transport.id}`);
+      
+      // Get peer and store transport
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        log.error(`Peer not found for transport storage`);
+        callback({ error: "Peer not found" });
+        return;
+      }
+
+      // Initialize transports Map if it doesn't exist
+      if (!peer.transports) {
+        peer.transports = new Map();
+      }
+
+      // Store the transport
+      peer.transports.set(transport.id, transport);
+      log.info(`Transport ${transport.id} stored for peer ${socket.id}`);
+
+      // Add event handlers for transport
+      transport.on('dtlsstatechange', (dtlsState) => {
+        log.info(`Transport ${transport.id} dtls state changed to ${dtlsState}`);
+        if (dtlsState === 'failed' || dtlsState === 'closed') {
+          log.error(`Transport ${transport.id} failed or closed unexpectedly`);
+        }
+      });
+
+      transport.on('icestatechange', (iceState) => {
+        log.info(`Transport ${transport.id} ice state changed to ${iceState}`);
+      });
+
+      transport.observer.on('close', () => {
+        log.info(`Transport ${transport.id} closed`);
+        peer.transports.delete(transport.id);
+      });
+
+      // Set max incoming bitrate
+      try {
+        await transport.setMaxIncomingBitrate(1500000);
+        log.info(`Set max incoming bitrate to 1500000 for ${transport.id}`);
+      } catch (error) {
+        log.warn(`Could not set max incoming bitrate for ${transport.id}:`, error);
+      }
+
+      log.info(`Transport params ready: ${transport.id}`);
+      callback(params);
+    } catch (error) {
+      log.error(`Error creating WebRTC transport:`, error);
+      callback({ error: error.message });
+    }
+  });
+
+  socket.on("connectWebRtcTransport", async ({ transportId, dtlsParameters }, callback) => {
+    try {
+      const roomName = socket.data.roomName || socket.roomName;
+      const room = rooms.get(roomName);
+      
+      if (!room) {
+        log.error(`Room not found for transport connection: ${roomName}`);
+        callback({ error: "Room not found" });
+        return;
+      }
+
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        log.error(`Peer not found for transport connection: ${socket.id}`);
+        callback({ error: "Peer not found" });
+        return;
+      }
+
+      if (!peer.transports) {
+        log.error(`No transports collection found for peer ${socket.id}`);
+        callback({ error: "No transports found" });
+        return;
+      }
+
+      const transport = peer.transports.get(transportId);
+      if (!transport) {
+        log.error(`Transport not found: ${transportId}`);
+        callback({ error: "Transport not found" });
+        return;
+      }
+
+      log.info(`Connecting transport ${transportId} with DTLS parameters`);
+      await transport.connect({ dtlsParameters });
+      log.info(`Transport ${transportId} connected successfully`);
+      
+      callback({ success: true });
+    } catch (error) {
+      log.error(`Error connecting transport:`, error);
+      callback({ error: error.message });
+    }
+  });
+
+  // Handle deviceReady event - client is ready to receive consumers
+  socket.on("deviceReady", async (data, callback) => {
+    try {
+      log.info(`Device ready for user ${socket.userId}`);
       
       const room = rooms.get(socket.roomName);
       if (!room) {
-        log.error(`Room not found for transport creation: ${socket.roomName}`);
-        log.error(`Available rooms: ${Array.from(rooms.keys()).join(', ')}`);
+        log.error(`Room not found for deviceReady: ${socket.roomName}`);
         safeCallback(callback, { error: "Room not found" });
         return;
       }
       
       const peer = room.peers.get(socket.id);
       if (!peer) {
-        log.error(`Peer not found for transport creation: ${socket.id}`);
-        log.error(`Available peers in room: ${Array.from(room.peers.keys()).join(', ')}`);
+        log.error(`Peer not found for deviceReady: ${socket.id}`);
         safeCallback(callback, { error: "Peer not found" });
         return;
       }
       
-      log.info(`Creating WebRTC transport with router ${room.router.id}`);
+      // Mark the peer's device as loaded
+      peer.deviceLoaded = true;
+      log.info(`Device marked as loaded for user ${socket.userId}`);
       
-      try {
-        const { transport, params } = await createWebRtcTransport(room.router);
-        
-        peer.transports[transport.id] = transport;
-        
-        transport.on("close", () => {
-          log.info(`Transport ${transport.id} closed`);
-          delete peer.transports[transport.id];
-        });
-        
-        log.info(`WebRTC transport created successfully: ${transport.id}`);
-        socket.emit("webrtc-transport-created", {
-          transportId: transport.id,
-          type: data.consumer ? "consumer" : "producer"
-        });
-        
-        log.info(`Sending transport params back to client: ${JSON.stringify(params.id)}`);
-        safeCallback(callback, { params });
-      } catch (transportError) {
-        log.error(`Error in createWebRtcTransport function:`, transportError);
-        log.error(`Router state: id=${room.router.id}, closed=${room.router.closed}`);
-        safeCallback(callback, { error: `Transport creation error: ${transportError.message}` });
-      }
+      // Notify the client that we've received their deviceReady event
+      safeCallback(callback, { success: true });
     } catch (error) {
-      log.error(`Error creating WebRTC transport:`, error);
+      log.error(`Error handling deviceReady:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
 
-  socket.on('transport-connect', async (data, callback) => {
+  // Handle transport-connect: acknowledge connection
+  socket.on("transport-connect", async (data, callback) => {
     try {
       const room = rooms.get(socket.roomName);
       if (!room) {
@@ -1300,6 +1398,7 @@ io.on("connection", async (socket) => {
         safeCallback(callback, { error: "Room not found" });
         return;
       }
+      
       const peer = room.peers.get(socket.id);
       if (!peer) {
         log.error(`Peer not found for user ${socket.userId}`);
@@ -1307,9 +1406,9 @@ io.on("connection", async (socket) => {
         return;
       }
       
-      const transport = peer.transports[data.transportId];
+      const transport = peer.transports.get(data.transportId);
       if (!transport) {
-        log.error(`Transport not found for user ${socket.userId}`);
+        log.error(`Transport ${data.transportId} not found for user ${socket.userId}`);
         safeCallback(callback, { error: "Transport not found" });
         return;
       }
@@ -1321,6 +1420,10 @@ io.on("connection", async (socket) => {
         rtpParameters: data.rtpParameters,
         appData: data.appData
       });
+      
+      if (!peer.producers) {
+        peer.producers = new Map();
+      }
       
       peer.producers.set(producer.id, producer);
       log.info(`Producer created: ${producer.id} for user ${socket.userId}`);
@@ -1341,62 +1444,6 @@ io.on("connection", async (socket) => {
       safeCallback(callback, { id: producer.id });
     } catch (error) {
       log.error(`Error creating producer:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-
-  socket.on("deviceReady", async (data, callback) => {
-    try {
-      log.info(`Device ready for user ${socket.userId}`);
-      
-      const room = rooms.get(socket.roomName);
-      if (!room) {
-        log.error(`Room not found for deviceReady: ${socket.roomName}`);
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      
-      const peer = room.peers.get(socket.id);
-      if (!peer) {
-        log.error(`Peer not found for deviceReady: ${socket.id}`);
-        safeCallback(callback, { error: "Peer not found" });
-        return;
-      }
-      
-      peer.deviceLoaded = true;
-      log.info(`Device marked as loaded for user ${socket.userId}`);
-      
-      safeCallback(callback, { success: true });
-    } catch (error) {
-      log.error(`Error handling deviceReady:`, error);
-      safeCallback(callback, { error: error.message });
-    }
-  });
-
-  socket.on("transport-recv-connect", async (data, callback) => {
-    try {
-      const room = rooms.get(socket.roomName);
-      if (!room) {
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      const peer = room.peers.get(socket.id);
-      if (!peer) {
-        safeCallback(callback, { error: "Peer not found" });
-        return;
-      }
-      
-      const transport = peer.transports[data.serverConsumerTransportId];
-      if (!transport) {
-        safeCallback(callback, { error: "Consumer transport not found" });
-        return;
-      }
-      
-      log.info(`Connecting consumer transport ${data.serverConsumerTransportId} for user ${socket.userId}`);
-      await transport.connect({ dtlsParameters: data.dtlsParameters });
-      safeCallback(callback);
-    } catch (error) {
-      log.error(`Error connecting consumer transport:`, error);
       safeCallback(callback, { error: error.message });
     }
   });
@@ -1671,455 +1718,62 @@ io.on("connection", async (socket) => {
     }
   });
 
-  socket.on("updateParticipantMediaState", (data, callback) => {
-    try {
-      const { roomId, participantId, updates } = data;
-      
-      if (!roomId) {
-        log.error(`No room ID provided for updateParticipantMediaState`);
-        safeCallback(callback, { error: "Room ID is required" });
-        return;
-      }
-      
-      if (!participantId) {
-        log.error(`No participant ID provided for updateParticipantMediaState`);
-        safeCallback(callback, { error: "Participant ID is required" });
-        return;
-      }
-      
-      log.info(`Updating media state for participant ${participantId} in room ${roomId}: ${JSON.stringify(updates)}`);
-      
-      const room = rooms.get(roomId);
-      if (!room) {
-        log.error(`Room ${roomId} not found for updateParticipantMediaState`);
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      
-      // Notify all other participants in the room about the media state change
-      socket.to(roomId).emit("participantMediaStateUpdated", {
-        participantId,
-        updates
-      });
-      
-      // Update the participant's state in the room data
-      for (const [peerId, peer] of room.peers.entries()) {
-        if (peer.userId === participantId) {
-          if (updates.audioEnabled !== undefined) {
-            peer.audioEnabled = updates.audioEnabled;
-          }
-          if (updates.videoEnabled !== undefined) {
-            peer.videoEnabled = updates.videoEnabled;
-          }
-          break;
-        }
-      }
-      
-      safeCallback(callback, { success: true });
-      
-      log.info(`Media state updated for participant ${participantId} in room ${roomId}`);
-    } catch (error) {
-      log.error(`Error handling updateParticipantMediaState:`, error);
-      safeCallback(callback, { error: error.message || "Internal server error" });
-    }
-  });
-
-  socket.on("initializePeer", (data, callback) => {
-    try {
-      const { roomName, userId, userName, userEmail } = data;
-      log.info(`[SocketIO] Initializing peer for user ${userName} (${userId}) in room ${roomName}`);
-      
-      const room = rooms.get(roomName);
-      if (!room) {
-        log.error(`[SocketIO] Room ${roomName} not found for peer initialization`);
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      
-      // Check if peer already exists
-      if (room.peers.has(socket.id)) {
-        log.info(`[SocketIO] Peer already exists for socket ${socket.id} in room ${roomName}`);
-        safeCallback(callback, { success: true, alreadyInitialized: true });
-        return;
-      }
-      
-      // Create peer data structure
-      const peer = {
-        id: socket.id,
-        userId,
-        userName,
-        userEmail,
-        socket,
-        transports: new Map(),
-        producers: new Map(),
-        consumers: new Map(),
-        deviceLoaded: false
-      };
-      
-      // Add peer to room
-      room.peers.set(socket.id, peer);
-      
-      log.info(`[SocketIO] Peer initialized for user ${userName} (${userId}) in room ${roomName}`);
-      
-      // Notify the client that the peer has been initialized
-      socket.emit("peerInitialized", {
-        peerId: socket.id,
-        userId,
-        roomName
-      });
-      
-      safeCallback(callback, { success: true });
-    } catch (error) {
-      log.error(`[SocketIO] Error initializing peer:`, error);
-      safeCallback(callback, { error: error.message || "Internal server error" });
-    }
-  });
-
-  socket.on("registerPeer", (data, callback) => {
-    try {
-      const { roomName, userId, userName, userEmail, rtpCapabilities } = data;
-      log.info(`[SocketIO] Registering peer for user ${userName} (${userId}) in room ${roomName}`);
-      
-      const room = rooms.get(roomName);
-      if (!room) {
-        log.error(`[SocketIO] Room ${roomName} not found for peer registration`);
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      
-      // Get the peer
-      const peer = room.peers.get(socket.id);
-      if (!peer) {
-        log.error(`[SocketIO] Peer not found for socket ${socket.id} in room ${roomName}`);
-        safeCallback(callback, { error: "Peer not found" });
-        return;
-      }
-      
-      // Update peer data
-      peer.rtpCapabilities = rtpCapabilities;
-      peer.deviceLoaded = true;
-      
-      log.info(`[SocketIO] Peer registered for user ${userName} (${userId}) in room ${roomName}`);
-      
-      safeCallback(callback, { success: true });
-    } catch (error) {
-      log.error(`[SocketIO] Error registering peer:`, error);
-      safeCallback(callback, { error: error.message || "Internal server error" });
-    }
-  });
-
-  socket.on("deviceReady", (data, callback) => {
-    try {
-      const { roomName, userId } = data;
-      log.info(`[SocketIO] Device ready for user ${userId} in room ${roomName}`);
-      
-      const room = rooms.get(roomName);
-      if (!room) {
-        log.error(`[SocketIO] Room ${roomName} not found for device ready notification`);
-        safeCallback(callback, { error: "Room not found" });
-        return;
-      }
-      
-      // Get the peer
-      const peer = room.peers.get(socket.id);
-      if (!peer) {
-        log.error(`[SocketIO] Peer not found for socket ${socket.id} in room ${roomName}`);
-        safeCallback(callback, { error: "Peer not found" });
-        return;
-      }
-      
-      // Update peer data
-      peer.deviceLoaded = true;
-      
-      log.info(`[SocketIO] Device marked as ready for user ${userId} in room ${roomName}`);
-      
-      safeCallback(callback, { success: true });
-    } catch (error) {
-      log.error(`[SocketIO] Error handling device ready:`, error);
-      safeCallback(callback, { error: error.message || "Internal server error" });
-    }
-  });
-
-  socket.on("disconnect", (reason) => {
-    const connectionDuration = Date.now() - (socket.connectionTime || Date.now());
-    log.info(`Socket ${socket.id} disconnected after ${connectionDuration}ms`, {
-      userName: socket.userName || 'unknown',
-      roomName: socket.roomName || 'unknown',
-      userId: socket.userId || 'unknown'
-    });
-    handleUserLeaving(socket);
-  });
-
-  socket.on('lockRoom', (data) => {
-    if (!isAdmin(socket.userEmail, socket)) {
-      socket.emit('error', { message: 'Unauthorized: Admin rights required' });
+  // Handle heartbeat
+  socket.on("heartbeat", () => {
+    if (!socket.data) {
+      console.warn(`${LOG_PREFIX} Received heartbeat from socket without data`);
       return;
     }
     
-    const { roomId } = data;
-    const room = rooms.get(roomId);
-    
+    const room = rooms.get(socket.data.roomName);
     if (!room) {
-      socket.emit('error', { message: 'Room not found' });
+      console.warn(`${LOG_PREFIX} Received heartbeat from socket not in a room`);
       return;
     }
+
+    // Update last heartbeat timestamp
+    socket.data.lastHeartbeat = Date.now();
     
-    // Set the room as locked
-    room.locked = true;
-    log.info(`Room ${roomId} locked by admin: ${socket.userEmail}`);
-    
-    // Notify all users in the room about the lock
-    // Find all sockets in this room
-    const socketsInRoom = [...io.sockets.sockets.values()].filter(s => s.roomName === roomId);
-    socketsInRoom.forEach(peerSocket => {
-      peerSocket.emit('roomLocked', { roomId });
-    });
-    
-    socket.emit('roomLocked', { success: true, roomId });
-  });
-  
-  socket.on('unlockRoom', (data) => {
-    if (!isAdmin(socket.userEmail, socket)) {
-      socket.emit('error', { message: 'Unauthorized: Admin rights required' });
-      return;
-    }
-    
-    const { roomId } = data;
-    const room = rooms.get(roomId);
-    
-    if (!room) {
-      socket.emit('error', { message: 'Room not found' });
-      return;
-    }
-    
-    // Set the room as unlocked
-    room.locked = false;
-    log.info(`Room ${roomId} unlocked by admin: ${socket.userEmail}`);
-    
-    // Notify all users in the room about the unlock
-    // Find all sockets in this room
-    const socketsInRoom = [...io.sockets.sockets.values()].filter(s => s.roomName === roomId);
-    socketsInRoom.forEach(peerSocket => {
-      peerSocket.emit('roomUnlocked', { roomId });
-    });
-    
-    socket.emit('roomUnlocked', { success: true, roomId });
-  });
-  
-  socket.on('muteParticipant', (data) => {
-    if (!isAdmin(socket.userEmail, socket)) {
-      socket.emit('error', { message: 'Unauthorized: Admin rights required' });
-      return;
-    }
-    
-    const { roomId, userId } = data;
-    
-    const userSocket = [...io.sockets.sockets.values()].find(s => s.userId === userId);
-    
-    if (!userSocket) {
-      socket.emit('error', { message: 'User not found' });
-      return;
-    }
-    
-    // Send mute command to the user
-    userSocket.emit('adminMute');
-    
-    log.info(`User ${userId} muted in room ${roomId} by admin: ${socket.userEmail}`);
-    
-    socket.emit('participantMuted', { success: true, roomId, userId });
-    
-    // Also broadcast to all users in the room that this user was muted
-    const socketsInRoom = [...io.sockets.sockets.values()].filter(s => s.roomName === roomId);
-    socketsInRoom.forEach(peerSocket => {
-      if (peerSocket.userId !== userId) { // Don't send to the muted user
-        peerSocket.emit('participantMuted', { roomId, userId });
-      }
-    });
+    // Send immediate response
+    socket.emit("heartbeat-ack");
   });
 
-  socket.on('kick_user', (data) => {
-    if (!isAdmin(socket.userEmail, socket)) {
-      socket.emit('error', { message: 'Unauthorized: Admin rights required' });
-      return;
+  // Handle ping
+  socket.on("ping", (callback) => {
+    if (typeof callback === "function") {
+      callback();
+    } else {
+      socket.emit("pong");
     }
-    
-    const { roomId, userId } = data;
-    
-    const userSocket = [...io.sockets.sockets.values()].find(s => s.id === userId || s.userId === userId);
-    
-    if (!userSocket) {
-      socket.emit('error', { message: 'User not found' });
-      return;
-    }
-    
-    userSocket.emit('kicked');
-    userSocket.disconnect(true);
-    
-    log.info(`User ${userId} kicked from room ${roomId} by admin: ${socket.userEmail}`);
-    
-    socket.emit('user_kicked', { roomId, userId });
   });
 
-  socket.on('removeParticipant', (data) => {
-    if (!isAdmin(socket.userEmail, socket)) {
-      socket.emit('error', { message: 'Unauthorized: Admin rights required' });
+  // Setup heartbeat monitoring
+  const heartbeatInterval = setInterval(() => {
+    if (!socket.data || !socket.connected) {
+      clearInterval(heartbeatInterval);
       return;
     }
-    
-    const { roomId, userId } = data;
-    
-    const userSocket = [...io.sockets.sockets.values()].find(s => s.userId === userId);
-    
-    if (!userSocket) {
-      socket.emit('error', { message: 'User not found' });
-      return;
-    }
-    
-    // Send kicked event to the user
-    userSocket.emit('kicked');
-    
-    // Force disconnect the user
-    userSocket.disconnect(true);
-    
-    log.info(`User ${userId} removed from room ${roomId} by admin: ${socket.userEmail}`);
-    
-    // Notify the admin
-    socket.emit('participantRemoved', { success: true, roomId, userId });
-    
-    // Also broadcast to all users in the room that this user was removed
-    const socketsInRoom = [...io.sockets.sockets.values()].filter(s => s.roomName === roomId);
-    socketsInRoom.forEach(peerSocket => {
-      peerSocket.emit('participantRemoved', { roomId, userId });
-    });
-  });
-  
-  socket.on('endMeeting', (data) => {
-    if (!isAdmin(socket.userEmail, socket)) {
-      socket.emit('error', { message: 'Unauthorized: Admin rights required' });
-      return;
-    }
-    
-    const { roomId } = data;
-    
-    // Find all sockets in this room
-    const socketsInRoom = [...io.sockets.sockets.values()].filter(s => s.roomName === roomId);
-    
-    // Notify all users that the meeting is ending
-    socketsInRoom.forEach(peerSocket => {
-      peerSocket.emit('meetingEnded', { roomId, endedBy: socket.userName || socket.userEmail });
-      
-      // Don't disconnect the admin who ended the meeting
-      if (peerSocket.id !== socket.id) {
-        peerSocket.disconnect(true);
-      }
-    });
-    
-    // Close and cleanup the room
-    closeAndCleanupRoom(roomId).then(() => {
-      log.info(`Meeting ended and room ${roomId} closed by admin: ${socket.userEmail}`);
-      socket.emit('meetingEnded', { success: true, roomId });
-    }).catch(error => {
-      log.error(`Error closing room ${roomId}: ${error}`);
-      socket.emit('error', { message: 'Failed to end meeting properly' });
-    });
-  });
 
-  socket.on('adminMute', (data) => {
-    if (!isAdmin(socket.userEmail, socket)) {
-      socket.emit('error', { message: 'Unauthorized: Admin rights required' });
-      return;
+    const now = Date.now();
+    const lastHeartbeat = socket.data.lastHeartbeat || 0;
+    
+    // If no heartbeat for 30 seconds, disconnect the socket
+    if (now - lastHeartbeat > 30000) {
+      console.warn(`${LOG_PREFIX} No heartbeat received for 30 seconds from ${socket.id}, disconnecting`);
+      socket.disconnect(true);
+      clearInterval(heartbeatInterval);
     }
-    
-    const { roomId, userId } = data;
-    
-    const userSocket = [...io.sockets.sockets.values()].find(s => s.userId === userId);
-    
-    if (!userSocket) {
-      socket.emit('error', { message: 'User not found' });
-      return;
-    }
-    
-    // Send mute command to the user
-    userSocket.emit('adminMute');
-    
-    log.info(`User ${userId} muted in room ${roomId} by admin: ${socket.userEmail}`);
-    
-    socket.emit('participantMuted', { success: true, roomId, userId });
-    
-    // Also broadcast to all users in the room that this user was muted
-    const socketsInRoom = [...io.sockets.sockets.values()].filter(s => s.roomName === roomId);
-    socketsInRoom.forEach(peerSocket => {
-      if (peerSocket.userId !== userId) { // Don't send to the muted user
-        peerSocket.emit('participantMuted', { roomId, userId });
-      }
-    });
-  });
+  }, 10000);
 
-  // Handle transport state changes
-  socket.on('transport-state-change', (data) => {
-    const { transportId, state, userId, roomName, error } = data;
-    
-    log.info(`Transport ${transportId} state changed to ${state} for user ${userId} in room ${roomName}`);
-    
-    // Get the room and peer
-    const room = rooms.get(roomName);
-    if (!room) {
-      log.error(`Room ${roomName} not found for transport state change`);
-      return;
-    }
-    
-    const peer = room.peers.get(socket.id);
-    if (!peer) {
-      log.error(`Peer not found for transport state change`);
-      return;
-    }
-    
-    // Update peer's transport state
-    if (state === 'connected') {
-      peer.transportReady = true;
-      log.info(`Transport ${transportId} is now ready for peer ${socket.id}`);
-      
-      // If this is a producer transport, mark it as ready
-      const transport = peer.transports[transportId];
-      if (transport && !transport.consumer) {
-        peer.producerTransportReady = true;
-        log.info(`Producer transport ${transportId} is now ready for peer ${socket.id}`);
-      }
-    } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-      peer.transportReady = false;
-      peer.producerTransportReady = false;
-      log.info(`Transport ${transportId} is no longer ready for peer ${socket.id}`);
-      
-      // Attempt to recover the transport
-      const transport = peer.transports[transportId];
-      if (transport) {
-        try {
-          transport.restartIce();
-          log.info(`ICE restart initiated for transport ${transportId}`);
-        } catch (error) {
-          log.error(`Error restarting ICE for transport ${transportId}:`, error);
-        }
-      }
-    }
-    
-    // Broadcast the transport state change to all users in the room
-    socket.to(roomName).emit('transport-state-change', {
-      transportId,
-      state,
-      userId,
-      error
-    });
-    
-    // Also send back to the sender to confirm receipt
-    socket.emit('transport-state-change', {
-      transportId,
-      state,
-      userId,
-      error
-    });
+  // Clean up interval on disconnect
+  socket.on("disconnect", () => {
+    clearInterval(heartbeatInterval);
   });
 });
 
+// ------------------------------
+// Helper: Handle Peer Leaving
+// ------------------------------
 function handleUserLeaving(socket) {
   const roomName = socket.roomName;
   if (!roomName) return;
