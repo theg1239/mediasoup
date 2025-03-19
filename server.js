@@ -512,126 +512,49 @@ async function getOrCreateRoom(roomName) {
 // Create WebRTC Transport
 // ------------------------------
 async function createWebRtcTransport(router) {
-  console.log(`${LOG_PREFIX} Creating WebRTC transport on router ${router.id}`);
-  
-  // Check router state
-  if (!router || router.closed) {
-    console.error(`${LOG_PREFIX} Router is invalid or closed: ${router?.id}`);
-    throw new Error("Router is invalid or closed");
-  }
-  
-  const { listenIps, initialAvailableOutgoingBitrate, maxIncomingBitrate } = mediasoupOptions.webRtcTransport;
-  
-  // Validate listenIps
-  if (!listenIps || !Array.isArray(listenIps) || listenIps.length === 0) {
-    console.error(`${LOG_PREFIX} Invalid listenIps configuration:`, listenIps);
-    throw new Error("Invalid listenIps configuration");
-  }
-  
-  console.log(`${LOG_PREFIX} Using listenIps:`, JSON.stringify(listenIps));
-  
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      const errMsg = `${LOG_PREFIX} Timeout creating WebRTC transport`;
-      console.error(errMsg);
-      reject(new Error(errMsg));
-    }, 10000);
-    
-    const transportOptions = {
-      listenIps,
+  try {
+    console.log(`${LOG_PREFIX} Creating WebRTC transport on router ${router.id}`);
+    console.log(`${LOG_PREFIX} Using listenIps: ${JSON.stringify(mediasoupOptions.webRtcTransport.listenIps)}`);
+
+    const transport = await router.createWebRtcTransport({
+      listenIps: mediasoupOptions.webRtcTransport.listenIps,
       enableUdp: true,
       enableTcp: true,
       preferUdp: true,
-      initialAvailableOutgoingBitrate,
-      enableSctp: true,
-      numSctpStreams: { OS: 1024, MIS: 1024 },
-      maxSctpMessageSize: 262144,
-      iceConsentTimeout: 60,
-      iceRetransmissionTimeout: 1000,
-      additionalSettings: {
-        iceTransportPolicy: "all",
-        iceCandidatePoolSize: 10,
-        iceServers: [
-          { urls: "stun:stun.l.google.com:19302" },
-          { urls: "stun:stun1.l.google.com:19302" },
-          { urls: "stun:stun2.l.google.com:19302" },
-          { urls: "stun:stun3.l.google.com:19302" },
-          { urls: "stun:stun4.l.google.com:19302" },
-          { urls: "stun:stun.stunprotocol.org:3478" }
-        ]
-      }
+      initialAvailableOutgoingBitrate: 1000000,
+      iceConsentTimeout: 60
+    });
+
+    // Extract and structure transport parameters
+    const params = {
+      id: transport.id,
+      iceParameters: transport.iceParameters,
+      iceCandidates: transport.iceCandidates,
+      dtlsParameters: transport.dtlsParameters,
+      sctpParameters: transport.sctpParameters
     };
-    
-    console.log(`${LOG_PREFIX} Creating transport with options:`, JSON.stringify({
-      enableUdp: transportOptions.enableUdp,
-      enableTcp: transportOptions.enableTcp,
-      preferUdp: transportOptions.preferUdp,
-      initialAvailableOutgoingBitrate: transportOptions.initialAvailableOutgoingBitrate,
-      iceConsentTimeout: transportOptions.iceConsentTimeout
-    }));
-    
-    router.createWebRtcTransport(transportOptions)
-      .then(async (transport) => {
-        clearTimeout(timeout);
-        log.info(`WebRTC transport created: ${transport.id}`);
-        
-        if (maxIncomingBitrate) {
-          try {
-            await transport.setMaxIncomingBitrate(maxIncomingBitrate);
-            log.info(`Set max incoming bitrate to ${maxIncomingBitrate} for ${transport.id}`);
-          } catch (bitrateError) {
-            log.warn(`Error setting max incoming bitrate: ${bitrateError.message}`);
-            // Continue despite bitrate setting error
-          }
-        }
-        
-        transport.on("routerclose", () =>
-          log.info(`Transport ${transport.id} closed (router closed)`)
-        );
-        
-        transport.on("icestatechange", (state) => {
-          log.info(`Transport ${transport.id} ICE state changed to: ${state}`);
-          if (state === "failed") {
-            transport.restartIce()
-              .then(() => log.info(`ICE restarted for transport ${transport.id}`))
-              .catch((error) => log.error(`ICE restart error for transport ${transport.id}:`, error));
-          }
-        });
-        
-        transport.on("dtlsstatechange", (state) => {
-          log.info(`Transport ${transport.id} DTLS state: ${state}`);
-        });
-        
-        transport.on("sctpstatechange", (state) => {
-          log.info(`Transport ${transport.id} SCTP state: ${state}`);
-        });
-        
-        const params = {
-          id: transport.id,
-          iceParameters: transport.iceParameters,
-          iceCandidates: transport.iceCandidates,
-          dtlsParameters: transport.dtlsParameters,
-          sctpParameters: transport.sctpParameters
-        };
-        
-        log.info(`Transport params ready: ${transport.id}`);
-        
-        resolve({
-          transport,
-          params
-        });
-      })
-      .catch((error) => {
-        clearTimeout(timeout);
-        log.error(`Error creating WebRTC transport:`, error);
-        log.error(`Transport options used:`, JSON.stringify({
-          listenIps: transportOptions.listenIps,
-          enableUdp: transportOptions.enableUdp,
-          enableTcp: transportOptions.enableTcp
-        }));
-        reject(error);
-      });
-  });
+
+    // Add event handlers for transport
+    transport.on('dtlsstatechange', (dtlsState) => {
+      console.log(`${LOG_PREFIX} Transport ${transport.id} dtls state changed to ${dtlsState}`);
+      if (dtlsState === 'failed' || dtlsState === 'closed') {
+        console.error(`${LOG_PREFIX} Transport ${transport.id} failed or closed unexpectedly`);
+      }
+    });
+
+    transport.on('icestatechange', (iceState) => {
+      console.log(`${LOG_PREFIX} Transport ${transport.id} ice state changed to ${iceState}`);
+    });
+
+    transport.observer.on('close', () => {
+      console.log(`${LOG_PREFIX} Transport ${transport.id} closed`);
+    });
+
+    return { transport, params };
+  } catch (error) {
+    console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
+    throw error;
+  }
 }
 
 // ------------------------------
@@ -1284,37 +1207,42 @@ io.on("connection", async (socket) => {
   // Handle createWebRtcTransport request
   socket.on("createWebRtcTransport", async ({ consumer }, callback) => {
     try {
-      const room = rooms.get(socket.data.roomName);
+      const room = rooms.get(socket.roomName);
       if (!room) {
-        console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.data.roomName}`);
+        console.error(`${LOG_PREFIX} Room not found for transport creation: ${socket.roomName}`);
         callback({ error: "Room not found" });
         return;
       }
 
       const router = room.router;
       if (!router) {
-        console.error(`${LOG_PREFIX} Router not found for room: ${socket.data.roomName}`);
+        console.error(`${LOG_PREFIX} Router not found for room: ${socket.roomName}`);
         callback({ error: "Router not found" });
         return;
       }
 
-      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.data.userId}, consumer: ${consumer}, socketId: ${socket.id}`);
-      console.log(`${LOG_PREFIX} Socket state: connected=${socket.connected}, roomName=${socket.data.roomName}`);
-      console.log(`${LOG_PREFIX} Creating WebRTC transport with router ${router.id}`);
-
-      const transport = await createWebRtcTransport(router);
-      if (!transport) {
+      console.log(`${LOG_PREFIX} Creating WebRTC transport for user ${socket.userId}, consumer: ${consumer}, socketId: ${socket.id}`);
+      
+      const { transport, params } = await createWebRtcTransport(router);
+      if (!transport || !params) {
         callback({ error: "Failed to create transport" });
         return;
       }
 
       console.log(`${LOG_PREFIX} WebRTC transport created: ${transport.id}`);
       
-      // Store transport based on type
+      // Store transport in the appropriate collection
+      const peer = room.peers.get(socket.id);
+      if (!peer) {
+        console.error(`${LOG_PREFIX} Peer not found for transport storage`);
+        callback({ error: "Peer not found" });
+        return;
+      }
+
       if (consumer) {
-        room.consumerTransports.set(transport.id, transport);
+        peer.consumers.set(transport.id, transport);
       } else {
-        room.producerTransports.set(transport.id, transport);
+        peer.producers.set(transport.id, transport);
       }
 
       // Set max incoming bitrate
@@ -1325,23 +1253,13 @@ io.on("connection", async (socket) => {
         console.warn(`${LOG_PREFIX} Could not set max incoming bitrate for ${transport.id}:`, error);
       }
 
-      console.log(`${LOG_PREFIX} Transport params ready: ${transport.id}`);
-      
-      const params = {
-        id: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters,
-        sctpParameters: transport.sctpParameters,
-      };
-
-      // Emit transport creation event to all clients in room
-      socket.to(socket.data.roomName).emit("webrtc-transport-created", {
+      // Notify other clients about the transport creation
+      socket.to(socket.roomName).emit("webrtc-transport-created", {
         transportId: transport.id,
         type: consumer ? "consumer" : "producer"
       });
 
-      console.log(`${LOG_PREFIX} WebRTC transport created successfully: ${transport.id}`);
+      console.log(`${LOG_PREFIX} Transport params ready: ${transport.id}`);
       callback(params);
     } catch (error) {
       console.error(`${LOG_PREFIX} Error creating WebRTC transport:`, error);
